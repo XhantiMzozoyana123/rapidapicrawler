@@ -35,8 +35,13 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
         await _browserLock.WaitAsync(ct);
         try
         {
+            // A headed browser is impossible without a display server (e.g. a VPS or
+            // Docker container with no X server / $DISPLAY). Force headless there so a
+            // forgotten or wrong "Headless" toggle can never crash the crawl.
+            var headless = _options.Headless || !HasDisplayServer();
+
             // If the headless preference changed while a browser was running, relaunch it.
-            if (_browser is { IsConnected: true } && _launchedHeadless != _options.Headless)
+            if (_browser is { IsConnected: true } && _launchedHeadless != headless)
             {
                 try { await _browser.CloseAsync(); } catch { /* ignore */ }
                 _browser = null;
@@ -44,16 +49,23 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
 
             if (_browser is { IsConnected: true }) return _browser;
             _playwright ??= await Playwright.CreateAsync();
-            _launchedHeadless = _options.Headless;
+            _launchedHeadless = headless;
             _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
-                Headless = _options.Headless,
-                Args = new[] { "--disable-blink-features=AutomationControlled" }
+                Headless = headless,
+                Args = new[] { "--disable-blink-features=AutomationControlled", "--no-sandbox" }
             });
             return _browser;
         }
         finally { _browserLock.Release(); }
     }
+
+    /// <summary>
+    /// True when a display server is available. On Linux a missing $DISPLAY means no X
+    /// server — only headless Chromium can run. On Windows there is always a desktop.
+    /// </summary>
+    private static bool HasDisplayServer()
+        => !OperatingSystem.IsLinux() || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"));
 
     public async IAsyncEnumerable<ApiListing> PopularListingsAsync(
         int runId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
