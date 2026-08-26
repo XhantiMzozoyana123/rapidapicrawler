@@ -2,6 +2,7 @@ using Hangfire;
 using Microsoft.AspNetCore.Mvc;
 using RapidApiCrawler.Application;
 using RapidApiCrawler.Web.Models;
+using RapidApiCrawler.Web.Services;
 
 namespace RapidApiCrawler.Web.Controllers;
 
