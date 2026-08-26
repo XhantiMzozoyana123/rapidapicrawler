@@ -16,6 +16,7 @@ namespace RapidApiCrawler.Infrastructure;
 public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposable
 {
     private readonly ScraperOptions _options;
+    private readonly Microsoft.Extensions.Logging.ILogger<PlaywrightRapidApiClient>? _logger;
     private bool _launchedHeadless;
 
     private const string BaseUrl = "https://rapidapi.com";
@@ -25,9 +26,10 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
     private IPlaywright? _playwright;
     private IBrowser? _browser;
 
-    public PlaywrightRapidApiClient(ScraperOptions options)
+    public PlaywrightRapidApiClient(ScraperOptions options, Microsoft.Extensions.Logging.ILogger<PlaywrightRapidApiClient>? logger = null)
     {
         _options = options;
+        _logger = logger;
     }
 
     private async Task<IBrowser> GetBrowserAsync(CancellationToken ct)
@@ -95,7 +97,7 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
     /// Opens <paramref name="startUrl"/>, extracts all '/api/' listing links via HtmlAgilityPack +
     /// regex into a hashmap (deduped), clicking the "Next Page" button across pages.
     /// </summary>
-    private static async IAsyncEnumerable<ApiListing> CollectListingsFromCollectionAsync(
+    private async IAsyncEnumerable<ApiListing> CollectListingsFromCollectionAsync(
         IBrowserContext context, string startUrl, int pageNumber,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
@@ -111,8 +113,9 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
                 ct.ThrowIfCancellationRequested();
 
                 var rawHtml = "";
-                for (var attempt = 0; attempt < 3 && string.IsNullOrEmpty(rawHtml) && !ct.IsCancellationRequested; attempt++)
+                for (var attempt = 1; attempt <= 3 && string.IsNullOrEmpty(rawHtml) && !ct.IsCancellationRequested; attempt++)
                 {
+                    _logger?.LogInformation("Loading {Url} (attempt {Attempt}/3)...", currentUrl, attempt);
                     await page.GotoAsync(currentUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
                     try
                     {
@@ -122,16 +125,37 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
                     }
                     catch (TimeoutException)
                     {
-                        // results not ready yet — reload and retry
+                        // results not ready yet — inspect what actually rendered before retrying
+                        var snapshot = await page.ContentAsync();
+                        _logger?.LogWarning(
+                            "No /api/ links rendered on {Url} (attempt {Attempt}). Got {Bytes} bytes of HTML. " +
+                            "Title: {Title}. Challenge/block present: {Blocked}",
+                            currentUrl, attempt, snapshot.Length,
+                            await page.TitleAsync(),
+                            snapshot.Contains("challenge", StringComparison.OrdinalIgnoreCase)
+                                || snapshot.Contains("captcha", StringComparison.OrdinalIgnoreCase)
+                                || snapshot.Contains("Access denied", StringComparison.OrdinalIgnoreCase));
                     }
                 }
                 if (string.IsNullOrEmpty(rawHtml))
+                {
+                    _logger?.LogError(
+                        "Gave up on {Url} after 3 attempts — the page never rendered any API links. " +
+                        "This usually means RapidAPI/Cloudflare is blocking this server's IP.",
+                        startUrl);
                     break;
+                }
 
                 // Extract links via HtmlAgilityPack + a regex filter for '/api/' hrefs,
                 // adding each unique one into the hashmap.
+                var foundOnPage = 0;
                 foreach (var listing in ExtractListingLinks(rawHtml, pageNumber))
-                    linkMap.TryAdd(listing.RelativeUrl, listing);
+                {
+                    if (linkMap.TryAdd(listing.RelativeUrl, listing)) foundOnPage++;
+                }
+                _logger?.LogInformation(
+                    "Page {Page}: extracted {Found} new listing links ({TotalTotal} total so far, page HTML {Bytes} bytes).",
+                    pageNumber, foundOnPage, linkMap.Count, rawHtml.Length);
 
                 // Click the button containing the "Next Page" keyword.
                 var nextButton = page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Next Page" });
