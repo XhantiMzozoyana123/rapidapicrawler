@@ -35,8 +35,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=build /app/publish .
 
-# Install Chromium + OS dependencies for Playwright (the crawler drives a real browser)
-RUN chmod +x ./playwright.sh && ./playwright.sh install --with-deps chromium
+# Install Chromium + OS dependencies for Playwright using the Node driver bundled
+# inside the publish output (.playwright/node/<rid>/node + .playwright/package/cli.js).
+RUN chmod +x ./.playwright/node/linux-x64/node \
+    && ./.playwright/node/linux-x64/node ./.playwright/package/cli.js install --with-deps chromium
 
 ENV ASPNETCORE_URLS=http://+:8080 \
     DOTNET_EnableDiagnostics=0
