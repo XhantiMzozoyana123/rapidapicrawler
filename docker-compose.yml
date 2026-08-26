@@ -8,8 +8,11 @@ services:
       MYSQL_DATABASE: RapidApiCrawler
       MYSQL_USER: rapidapi
       MYSQL_PASSWORD: your_password
-    ports:
-      - "3306:3306"
+    # Not published to the host: the web app reaches MySQL over the internal Docker
+    # network ("server=mysql"). Host port 3306 is often taken by a system MySQL.
+    # If you need external access, map a free port instead, e.g. "3307:3306".
+    expose:
+      - "3306"
     volumes:
       - mysql_data:/var/lib/mysql
     command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
