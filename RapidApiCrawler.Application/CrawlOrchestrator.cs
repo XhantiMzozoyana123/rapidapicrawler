@@ -119,6 +119,36 @@ public class CrawlOrchestrator(
         return run;
     }
 
+    /// <summary>
+    /// Runs the local-LLM gap-analysis for an already-completed crawl run and stores
+    /// the resulting report (used by the Report page's "Generate report" button).
+    /// </summary>
+    public async Task<string> AnalyzeExistingRunAsync(int runId, CancellationToken ct = default)
+    {
+        var listings = await repository.GetListingsAsync(runId);
+        if (listings.Count == 0)
+            throw new InvalidOperationException(
+                $"Run #{runId} has no listings to analyze — run a crawl first.");
+
+        var run = (await repository.GetRunsAsync()).FirstOrDefault(r => r.Id == runId)
+                  ?? throw new InvalidOperationException($"Run #{runId} not found.");
+
+        Report($"Generating gap-analysis report for run #{runId} '{run.Keyword}' ({listings.Count} listings)...");
+
+        var context = await BuildContext(runId);
+        var reportText = await analyzer.AnalyzeAsync(run.Keyword, context, ct);
+
+        await repository.AddReportAsync(new AnalysisReport
+        {
+            SearchRunId = runId,
+            Model = "llama-local",
+            ReportText = reportText
+        });
+
+        Report("Analysis report saved.");
+        return reportText;
+    }
+
     private async Task<string> BuildContext(int runId)
     {
         // Summarize listings so the LLM sees real signals.

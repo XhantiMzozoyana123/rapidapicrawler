@@ -80,6 +80,33 @@ public class CrawlJobService
         }
     }
 
+    /// <summary>Hangfire entry point: generate (or regenerate) the AI gap-analysis report for an existing crawl run.</summary>
+    [AutomaticRetry(Attempts = 0)]
+    public async Task RunAnalysisAsync(string jobId, int runId)
+    {
+        void Handler(object? _, ProgressEventArgs e) => _coordinator.Append(jobId, e.Message);
+
+        _orchestrator.Progress += Handler;
+        try
+        {
+            _logger.LogInformation("Starting gap-analysis for run #{RunId} (job {JobId}).", runId, jobId);
+            var text = await _orchestrator.AnalyzeExistingRunAsync(runId, CancellationToken.None);
+            _coordinator.Complete(jobId, runId, 0, 0);
+            _coordinator.Append(jobId, "=== REPORT READY — see the Report page ===");
+            _logger.LogInformation("Gap-analysis job {JobId} completed ({Length} chars).", jobId, text.Length);
+        }
+        catch (Exception ex)
+        {
+            _coordinator.Fail(jobId, ex.Message);
+            _logger.LogError(ex, "Gap-analysis job {JobId} failed.", jobId);
+            throw;
+        }
+        finally
+        {
+            _orchestrator.Progress -= Handler;
+        }
+    }
+
     [AutomaticRetry(Attempts = 0)]
     public async Task RunPopularCrawlAsync(string jobId, bool analyze, int maxListings, bool headless)
     {

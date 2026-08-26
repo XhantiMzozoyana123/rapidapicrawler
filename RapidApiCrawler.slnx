@@ -4,5 +4,4 @@
   <Project Path="RapidApiCrawler.Domain/RapidApiCrawler.Domain.csproj" />
   <Project Path="RapidApiCrawler.Infrastructure/RapidApiCrawler.Infrastructure.csproj" />
   <Project Path="RapidApiCrawler.Web/RapidApiCrawler.Web.csproj" />
-  <Project Path="RapidApiCrawler/RapidApiCrawler.csproj" />
 </Solution>
