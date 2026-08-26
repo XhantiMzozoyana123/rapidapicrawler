@@ -29,8 +29,8 @@ publish/
 # Scraped data / exports
 exports/
 
-# Local LLM models — never commit multi-GB GGUF files
-models/
+# Local LLM models — never commit multi-GB GGUF files (root-level ./models only)
+/models/
 
 # Logs & temp files
 *.log
