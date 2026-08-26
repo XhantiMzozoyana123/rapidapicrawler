@@ -155,8 +155,18 @@ public partial class PlaywrightRapidApiClient : IRapidApiClient, IAsyncDisposabl
                     if (linkMap.TryAdd(listing.RelativeUrl, listing)) foundOnPage++;
                 }
                 _logger?.LogInformation(
-                    "Page {Page}: extracted {Found} new listing links ({TotalTotal} total so far, page HTML {Bytes} bytes).",
+                    "Page {Page}: extracted {Found} new listing links ({Total} total so far, page HTML {Bytes} bytes).",
                     pageNumber, foundOnPage, linkMap.Count, rawHtml.Length);
+
+                // RapidAPI collection/search pages are SPAs that ignore "?page=N" query
+                // params — every URL load can render the SAME first-page content. When a
+                // fully-loaded page contributes nothing new, pagination is exhausted:
+                // stop instead of burn through the safety cap.
+                if (foundOnPage == 0)
+                {
+                    _logger?.LogInformation("Page {Page} added no new links — pagination complete.", pageNumber);
+                    break;
+                }
 
                 // Click the button containing the "Next Page" keyword.
                 var nextButton = page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Next Page" });
