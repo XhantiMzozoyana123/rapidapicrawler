@@ -1,6 +1,7 @@
 using Hangfire;
 using Hangfire.Dashboard;
 using Hangfire.MemoryStorage;
+using Microsoft.AspNetCore.DataProtection;
 using RapidApiCrawler.Application;
 using RapidApiCrawler.Infrastructure;
 using RapidApiCrawler.Web.Services;
