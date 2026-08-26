@@ -12,7 +12,8 @@ builder.Services.AddControllersWithViews();
 // Persist DataProtection keys so antiforgery tokens survive container restarts
 // (otherwise every restart invalidates all open pages' form tokens: "The key ...
 // was not found in the key ring" on POST).
-builder.Services.AddDataProtection(options => options.ApplicationName = "RapidApiCrawler")
+builder.Services.AddDataProtection()
+    .SetApplicationName("RapidApiCrawler")
     .PersistKeysToFileSystem(new DirectoryInfo("/app/data/keys"));
 
 // ---- RapidApiCrawler services (shared clean-architecture layers) ----
