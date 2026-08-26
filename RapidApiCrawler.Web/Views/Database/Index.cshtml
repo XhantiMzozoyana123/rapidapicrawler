@@ -10,10 +10,27 @@
 <p class="mb-3">
     @foreach (var t in tables)
     {
-        <a asp-action="Index" asp-route-table="@t" class="btn btn-sm @(t == selected ? "btn-primary" : "btn-outline-primary")">@t</a>
-        <a asp-controller="Export" asp-action="Table" asp-route-table="@t" class="btn btn-sm btn-outline-secondary ms-0" title="Download @(t).csv">⬇</a>
+        <span class="btn-group btn-group-sm me-1" role="group">
+            <a asp-action="Index" asp-route-table="@t" class="btn @(t == selected ? "btn-primary" : "btn-outline-primary")">@t</a>
+            <a asp-controller="Export" asp-action="Table" asp-route-table="@t" class="btn btn-outline-secondary" title="Download @(t).csv">⬇</a>
+            <form asp-action="ClearTable" asp-route-table="@t" method="post" class="d-inline"
+                  onsubmit="return confirm('Delete ALL rows from table @t? This cannot be undone.');">
+                <button type="submit" class="btn btn-outline-danger" title="Delete all rows in @t">🗑</button>
+            </form>
+        </span>
     }
 </p>
+
+<div class="card border-danger mb-3">
+    <div class="card-body py-2">
+        <form asp-action="ClearAll" method="post" class="d-flex align-items-center gap-2"
+              onsubmit="return confirm('Delete EVERY data record from ALL tables? This cannot be undone.');">
+            <span class="text-danger fw-bold">Danger zone:</span>
+            <button type="submit" class="btn btn-sm btn-danger">Delete ALL data</button>
+            <span class="text-muted small">removes every row from every crawler table</span>
+        </form>
+    </div>
+</div>
 
 @if (TempData["ExportMessage"] is string em)
 {

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Hangfire;
 using Microsoft.AspNetCore.Mvc;
 using RapidApiCrawler.Application;
 using RapidApiCrawler.Infrastructure;
@@ -9,75 +10,77 @@ namespace RapidApiCrawler.Web.Controllers;
 
 public class HomeController : Controller
 {
-    private readonly CrawlOrchestrator _orchestrator;
     private readonly ISearchRunRepository _repository;
     private readonly ScraperOptions _scraperOptions;
-    private readonly CrawlSessionStore _store;
+    private readonly CrawlJobCoordinator _coordinator;
+    private readonly IBackgroundJobClient _backgroundJobs;
+    private readonly IConfiguration _configuration;
+
+    public const string CronJobId = "rapidapi-crawl";
 
     public HomeController(
-        CrawlOrchestrator orchestrator,
         ISearchRunRepository repository,
         ScraperOptions scraperOptions,
-        CrawlSessionStore store)
+        CrawlJobCoordinator coordinator,
+        IBackgroundJobClient backgroundJobs,
+        IConfiguration configuration)
     {
-        _orchestrator = orchestrator;
         _repository = repository;
         _scraperOptions = scraperOptions;
-        _store = store;
+        _coordinator = coordinator;
+        _backgroundJobs = backgroundJobs;
+        _configuration = configuration;
     }
 
-    public async Task<IActionResult> Index()
+    public async Task<IActionResult> Index(string? jobId)
     {
         var runs = await _repository.GetRunsAsync();
-        ViewBag.Snapshot = _store.Snapshot();
+        ViewBag.SelectedJobId = jobId ?? _coordinator.Snapshot(null).JobId;
+        ViewBag.Snapshot = _coordinator.Snapshot(jobId);
+        ViewBag.Jobs = _coordinator.All();
+        ViewBag.CronKeyword = _configuration["Hangfire:DefaultKeyword"] ?? "instagram scraper";
+        ViewBag.CronExpression = _configuration["Hangfire:Cron"] ?? "0 */4 * * *";
+        ViewBag.CronJobId = CronJobId;
+        ViewBag.DashboardRoute = _configuration["Hangfire:DashboardRoute"] ?? "/hangfire";
         return View(runs);
     }
 
+    /// <summary>Enqueues a one-off crawl via Hangfire and redirects to poll its job id.</summary>
     [HttpPost]
     public IActionResult Start(string keyword, bool analyze, bool headless)
     {
         if (string.IsNullOrWhiteSpace(keyword))
             return RedirectToAction(nameof(Index));
 
-        // Apply the headless/headed preference.
-        _scraperOptions.Headless = headless;
-
-        if (!_store.IsRunning)
-        {
-            _store.Start(keyword.Trim());
-            var runAnalyze = analyze;
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    var ct = CancellationToken.None;
-                    // Subscribe so progress is pushed into the store while the crawl runs.
-                    var progress = new EventHandler<ProgressEventArgs>((_, e) => _store.Append(e.Message));
-                    _orchestrator.Progress += progress;
-                    try
-                    {
-                        var run = await _orchestrator.RunAsync(keyword.Trim(), runAnalyze, ct, maxListings: 200);
-                        _store.Complete(run.Id, run.ListingsFound, run.PagesCrawled);
-                    }
-                    finally
-                    {
-                        _orchestrator.Progress -= progress;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _store.Fail(ex.Message);
-                }
-            });
-        }
-
-        return RedirectToAction(nameof(Index));
+        var kw = keyword.Trim();
+        var jobId = "manual-" + Guid.NewGuid().ToString("N")[..12];
+        var maxListings = _configuration.GetValue("Hangfire:MaxListings", 200);
+        _backgroundJobs.Enqueue<CrawlJobService>(svc => svc.RunCrawlAsync(jobId, kw, analyze, maxListings, headless));
+        return RedirectToAction(nameof(Index), new { jobId });
     }
 
-    /// <summary>Returns the current crawl progress as JSON for the page to poll.</summary>
+    /// <summary>Enqueues a scrape of the RapidAPI "Popular APIs" collection.</summary>
+    [HttpPost]
+    public IActionResult StartPopular(bool headless)
+    {
+        var jobId = "popular-" + Guid.NewGuid().ToString("N")[..12];
+        var maxListings = _configuration.GetValue("Hangfire:MaxListings", 200);
+        _backgroundJobs.Enqueue<CrawlJobService>(svc => svc.RunPopularCrawlAsync(jobId, false, maxListings, headless));
+        return RedirectToAction(nameof(Index), new { jobId });
+    }
+
+    /// <summary>Triggers the scheduled cron job immediately from the UI.</summary>
+    [HttpPost]
+    public IActionResult RunScheduled()
+    {
+        RecurringJob.TriggerJob(CronJobId);
+        return RedirectToAction(nameof(Index), new { jobId = CronJobId });
+    }
+
+    /// <summary>Returns the live crawl job progress as JSON for the page to poll (every 5s).</summary>
     [HttpGet]
-    public IActionResult Progress()
-        => Json(_store.Snapshot());
+    public IActionResult Progress(string? jobId)
+        => Json(_coordinator.Snapshot(jobId));
 
     [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
     public IActionResult Error()

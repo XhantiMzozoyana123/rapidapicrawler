@@ -1,24 +1,49 @@
 ﻿@using RapidApiCrawler.Domain
+@using RapidApiCrawler.Web.Services
 @model List<SearchRun>
 @{
     ViewData["Title"] = "RapidAPI Competitor Research";
-    var snap = (RapidApiCrawler.Web.Services.CrawlSnapshot)ViewBag.Snapshot!;
+    var snap = (CrawlJobSnapshot)ViewBag.Snapshot!;
+    var jobs = (IReadOnlyList<CrawlJobSnapshot>)ViewBag.Jobs!;
+    var selectedJobId = (string)ViewBag.SelectedJobId!;
+    var cronKeyword = (string)ViewBag.CronKeyword!;
+    var cronExpression = (string)ViewBag.CronExpression!;
+    var cronJobId = (string)ViewBag.CronJobId!;
+    var dashboardRoute = (string)ViewBag.DashboardRoute!;
 }
 
 <div class="row">
     <div class="col-lg-5">
-        <h4 class="mb-3">Start a crawl</h4>
+        <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><strong>Scheduled cron crawl</strong></span>
+                <a href="@dashboardRoute" target="_blank" rel="noopener" class="small">Job Dashboard</a>
+            </div>
+            <div class="card-body">
+                <dl class="row mb-2 small">
+                    <dt class="col-4">Job id</dt><dd class="col-8"><code>@cronJobId</code></dd>
+                    <dt class="col-4">Schedule</dt><dd class="col-8"><code>@cronExpression</code> (UTC)</dd>
+                    <dt class="col-4">Keyword</dt><dd class="col-8">@cronKeyword</dd>
+                </dl>
+                <form asp-action="RunScheduled" method="post">
+                    <button type="submit" class="btn btn-outline-secondary btn-sm">Run scheduled crawl now</button>
+                </form>
+            </div>
+        </div>
+
+        <hr />
+        <h4 class="mb-3">Start a one-off crawl</h4>
         <form asp-action="Start" method="post">
             <div class="mb-3">
                 <label class="form-label">Keyword</label>
                 <input type="text" name="keyword" class="form-control" placeholder="e.g. instagram scraper" required value="@snap.Keyword" />
             </div>
             <div class="form-check form-switch mb-2">
-                <input class="form-check-input" type="checkbox" role="switch" id="analyze" name="analyze" checked>
-                <label class="form-check-label" for="analyze">Run AI gap analysis (Gemini)</label>
+                <input class="form-check-input" type="checkbox" role="switch" id="analyze" name="analyze">
+                <label class="form-check-label" for="analyze">Run AI gap analysis</label>
             </div>
             <div class="form-check form-switch mb-3">
-                <input class="form-check-input" type="checkbox" role="switch" id="headless" name="headless">
+                <input class="form-check-input" type="checkbox" role="switch" id="headless" name="headless" checked>
                 <label class="form-check-label" for="headless">Headless browser (off = watch the browser)</label>
             </div>
             <button type="submit" class="btn btn-primary" id="startBtn" @(snap.IsRunning ? "disabled" : "")>
@@ -27,19 +52,68 @@
         </form>
 
         <hr />
-        <h5>Live progress</h5>
-        <div id="status" class="fs-6 fw-bold">@snap.Status</div>
-        <div id="stats" class="text-muted small">@snap.ListingsFound listings &middot; @snap.PagesCrawled pages</div>
-        <ul id="log" class="mt-2 list-unstyled small" style="max-height:340px; overflow-y:auto; font-family: monospace;">
+        <h5 class="mb-2">Quick scrape</h5>
+        <form asp-action="StartPopular" method="post" class="d-flex align-items-center gap-2">
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" role="switch" id="popularHeadless" name="headless" checked>
+                <label class="form-check-label small" for="popularHeadless">Headless</label>
+            </div>
+            <button type="submit" class="btn btn-success btn-sm" @(snap.IsRunning ? "disabled" : "")>
+                🔥 Scrape Popular APIs
+            </button>
+            <span class="text-muted small">rapidapi.com/collection/popular-apis</span>
+        </form>
+    </div>
+
+    <div class="col-lg-7">
+        <h4 class="mb-3">Live crawl progress</h4>
+        <div class="d-flex align-items-center mb-2">
+            <span class="badge text-bg-secondary me-2" id="status">@snap.Status</span>
+            <span class="text-muted small"><code id="jobId">@(selectedJobId != "" ? selectedJobId : "-")</code></span>
+        </div>
+
+        <div class="alert alert-info py-2 mb-2">
+            <div class="small text-uppercase text-muted fw-bold mb-1">Currently scraping</div>
+            <div id="currentScraping" class="mb-0" style="font-family: monospace;">@snap.CurrentScraping</div>
+        </div>
+
+        <div id="stats" class="text-muted small mb-2">@snap.ListingsFound listings &middot; @snap.PagesCrawled pages</div>
+
+        <ul id="log" class="mt-2 list-unstyled small p-2 bg-light border rounded" style="max-height:280px; overflow-y:auto; font-family: monospace;">
             @foreach (var msg in snap.Messages)
             {
                 <li>@msg</li>
             }
         </ul>
+<h5 class="mt-4 mb-2">Recent jobs (this process)</h5>
+        @if (!jobs.Any())
+        {
+            <p class="text-muted small">No jobs have run in this process yet - wait for the cron schedule or start one above.</p>
+        }
+        else
+        {
+            <table class="table table-sm table-striped small">
+                <thead><tr><th>Job</th><th>Keyword</th><th>Status</th><th>Listings</th><th>Pages</th></tr></thead>
+                <tbody>
+                @foreach (var j in jobs)
+                {
+                    <tr>
+                        <td><a asp-action="Index" asp-route-jobId="@j.JobId"><code>@j.JobId</code></a></td>
+                        <td>@j.Keyword</td>
+                        <td><span class="badge text-bg-@(j.IsRunning ? "success" : j.Status == "Failed" ? "danger" : "secondary")">@j.Status</span></td>
+                        <td>@j.ListingsFound</td>
+                        <td>@j.PagesCrawled</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
     </div>
+</div>
 
-    <div class="col-lg-7">
-        <h4 class="mb-3">Recent runs</h4>
+<div class="row mt-4">
+    <div class="col">
+        <h4 class="mb-3">Recent runs (database)</h4>
         @if (!Model.Any())
         {
             <p class="text-muted">No runs yet.</p>
@@ -68,40 +142,49 @@
 
 @section Scripts {
 <script>
-    var knownCount = 0; // how many log lines we've already rendered
-    (function initLog() {
-        knownCount = document.getElementById('log').children.length;
-    })();
+    var JOB_ID = '@selectedJobId';
+    var POLL_MS = 5000;   // poll the selected job id every 5 seconds
+    var KNOWN = 0;         // messages already rendered for the currently displayed job
 
-    function refreshProgress() {
-        fetch('@Url.Action("Progress")', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-            .then(r => r.json())
-            .then(s => {
-                document.getElementById('status').textContent = s.status;
-                document.getElementById('stats').textContent = s.listingsFound + ' listings · ' + s.pagesCrawled + ' pages';
-                var log = document.getElementById('log');
-                var msgs = s.messages || [];
-                // Append only messages we haven't rendered yet.
-                for (var i = knownCount; i < msgs.length; i++) {
-                    var li = document.createElement('li');
-                    li.textContent = msgs[i];
-                    log.appendChild(li);
-                }
-                knownCount = msgs.length;
-                log.scrollTop = log.scrollHeight;
+    function updateUI(s) {
+        var b = document.getElementById('status');
+        b.textContent = s.status;
+        b.className = 'badge text-bg-' + (s.isRunning ? 'success' : s.status === 'Failed' ? 'danger' : 'secondary') + ' me-2';
+        document.getElementById('jobId').textContent = s.jobId || '-';
+        document.getElementById('stats').textContent = s.listingsFound + ' listings \u00B7 ' + s.pagesCrawled + ' pages';
+        document.getElementById('currentScraping').textContent = s.currentScraping || '';
 
-                var btn = document.getElementById('startBtn');
-                if (s.isRunning) {
-                    btn.disabled = true;
-                    btn.textContent = 'Crawl running…';
-                    setTimeout(refreshProgress, 1500);
-                } else {
-                    btn.disabled = false;
-                    btn.textContent = 'Start Crawl';
-                }
-            })
-            .catch(() => {});
+        var log = document.getElementById('log');
+        var msgs = s.messages || [];
+        for (var i = KNOWN; i < msgs.length; i++) {
+            var li = document.createElement('li');
+            li.textContent = msgs[i];
+            log.appendChild(li);
+        }
+        KNOWN = msgs.length;
+        log.scrollTop = log.scrollHeight;
+
+        var btn = document.getElementById('startBtn');
+        if (s.isRunning) {
+            btn.disabled = true;
+            btn.textContent = 'Crawl running\u2026';
+        } else {
+            btn.disabled = false;
+            btn.textContent = 'Start Crawl';
+        }
     }
-    if (@(snap.IsRunning ? "true" : "false")) { refreshProgress(); }
+
+    function poll() {
+        var url = '@Url.Action("Progress")' + (JOB_ID ? '?jobId=' + encodeURIComponent(JOB_ID) : '');
+        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.json())
+            .then(s => { updateUI(s); setTimeout(poll, POLL_MS); })
+            .catch(() => setTimeout(poll, POLL_MS));
+    }
+
+    (function init() {
+        KNOWN = document.getElementById('log').children.length;
+        if (@(snap.IsRunning ? "true" : "false")) { poll(); }
+    })();
 </script>
 }

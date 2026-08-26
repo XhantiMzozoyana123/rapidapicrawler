@@ -6,10 +6,13 @@ public interface IRapidApiClient
     /// <summary>Opens the search page and collects all listing links across pages until no "Next Page" exists.</summary>
     IAsyncEnumerable<ApiListing> SearchListingsAsync(string keyword, int runId, CancellationToken ct = default);
 
+    /// <summary>Crawls the RapidAPI "Popular APIs" collection and yields every API listing found.</summary>
+    IAsyncEnumerable<ApiListing> PopularListingsAsync(int runId, CancellationToken ct = default);
+
     /// <summary>
-    /// Opens a listing in a new tab, captures the playground page HTML, the API home page HTML
-    /// (breadcrumb link) and the Discussions tab HTML, then closes the tab.
-    /// Returns the captured page types with their HTML.
+    /// Opens a listing in a new tab, clicks the Discussions tab and captures every
+    /// discussions-list page (following "next" pagination until exhausted), then closes the tab.
+    /// Returns the captured discussions pages with their HTML.
     /// </summary>
     Task<List<CrawledPage>> CaptureListingAsync(ApiListing listing, CancellationToken ct = default);
 }
@@ -32,6 +35,12 @@ public interface ISearchRunRepository
     Task<int> CountPagesAsync(int runId);
     Task<List<string>> GetTableNamesAsync();
     Task<TableResult> QueryTableAsync(string tableName, int? limit = 200);
+
+    /// <summary>Deletes every row from <paramref name="tableName"/> and returns the number of affected rows.</summary>
+    Task<int> ClearTableAsync(string tableName);
+
+    /// <summary>Deletes every data record from all crawler tables and returns total rows removed.</summary>
+    Task<int> ClearAllDataAsync();
 }
 
 /// <summary>Writes the scraped database tables out as CSV files.</summary>

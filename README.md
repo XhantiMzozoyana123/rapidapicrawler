@@ -88,11 +88,9 @@ your GGUF model is mounted read-only from `./models`.
 1. Opens `https://rapidapi.com/search?term={keyword}&sortBy=ByRelevance`
 2. Collects every listing link (`a.text-inherit[href*='/api/']`)
 3. Opens each listing in a new browser tab
-4. Captures the **playground** page HTML
-5. Clicks the **breadcrumb** link → captures the **API home** page HTML
-6. Clicks the **Discussions** tab → captures its HTML
-7. Clicks **Next Page** until it no longer exists (repeats 2–7 per search page)
-8. Closes the tab and moves to the next listing
+4. Clicks the **Discussions** tab and captures its HTML
+5. Clicks **next** pagination until exhausted, capturing every discussions page
+6. Closes the tab and moves to the next listing (search pagination repeats 2–5 per search page)
 
 All raw HTML and metadata are persisted to **MySQL** tables
 (`SearchRuns`, `ApiListings`, `CrawledPages`, `AnalysisReports`).
@@ -165,10 +163,10 @@ dotnet run --project RapidApiCrawler.Cli -c Debug -- --import-sqlite ./rapidapi-
 dotnet run --project RapidApiCrawler.Cli -c Debug -- --export
 ```
 
-### MAUI app
+### MAUI app (Windows only)
 
-Run the `RapidApiCrawler` project (Windows target
-`net10.0-windows10.0.19041.0`) in Visual Studio. Enter a keyword, optionally tick
+The MAUI app targets **Windows** exclusively (`net10.0-windows10.0.19041.0`).
+Run the `RapidApiCrawler` project in Visual Studio or with `dotnet run --project RapidApiCrawler`. Enter a keyword, optionally tick
 "AI gap analysis", press **Start Crawl**, and watch the live progress. Press
 **Show Last Report** to view the local-LLM gap-analysis report, or **View Database**
 to browse the raw MySQL tables (`SearchRuns`, `ApiListings`, `CrawledPages`,`AnalysisReports`).

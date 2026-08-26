@@ -22,12 +22,11 @@ var headless = !args.Contains("--headed");
 var connectionString = ParseArg(args, "--conn") ?? Environment.GetEnvironmentVariable("MYSQL_CONNECTION_STRING") ?? "";
 
 var services = new ServiceCollection();
-services.AddSingleton(new MySqlOptions(connectionString));
 services.AddSingleton(new LlamaOptions { ModelPath = llamaModelPath, GpuLayerCount = gpuLayers, ContextSize = contextSize });
 services.AddSingleton(new ScraperOptions { Headless = headless });
 services.AddSingleton<ILlmAnalyzer, LlamaSharpLlmClient>();
 services.AddSingleton<IRapidApiClient, PlaywrightRapidApiClient>();
-services.AddSingleton<ISearchRunRepository>(sp => new MySqlSearchRunRepository(sp.GetRequiredService<MySqlOptions>()));
+services.AddRapidApiDatabase(connectionString);
 services.AddSingleton<ICsvExporter, CsvExporter>();
 services.AddSingleton<CrawlOrchestrator>();
 await using var provider = services.BuildServiceProvider();

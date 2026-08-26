@@ -40,7 +40,7 @@ public class CrawlOrchestrator(
                 }
 
                 run.PagesCrawled += pages.Count;
-                Report($"Captured {pages.Count} pages for '{listing.Name}' (playground / API home / discussions).");
+                Report($"Captured {pages.Count} discussions page(s) for '{listing.Name}'.");
             }
 
             run.CompletedUtc = DateTime.UtcNow;
@@ -68,6 +68,52 @@ public class CrawlOrchestrator(
                 ReportText = reportText
             });
             Report("Analysis report saved.");
+        }
+
+        return run;
+    }
+
+    public async Task<SearchRun> RunPopularAsync(bool analyzeWithLlm, CancellationToken ct = default, int maxListings = int.MaxValue)
+    {
+        var run = new SearchRun { Keyword = "popular-apis", StartedUtc = DateTime.UtcNow, Status = "Running" };
+        run.Id = await repository.CreateRunAsync(run);
+        Report($"[{run.Id}] Starting scrape of the RapidAPI 'Popular APIs' collection.");
+
+        try
+        {
+            await foreach (var listing in client.PopularListingsAsync(run.Id, ct))
+            {
+                if (run.ListingsFound >= maxListings) break;
+
+                listing.SearchRunId = run.Id;
+                await repository.AddListingAsync(listing);
+                run.ListingsFound++;
+                Report($"Found listing: {listing.Name} ({listing.Provider}/{listing.ApiSlug})");
+
+                ct.ThrowIfCancellationRequested();
+
+                var pages = await client.CaptureListingAsync(listing, ct);
+                foreach (var page in pages)
+                {
+                    page.ListingId = listing.Id;
+                    await repository.AddPageAsync(page);
+                }
+
+                run.PagesCrawled += pages.Count;
+                Report($"Captured {pages.Count} page(s) for '{listing.Name}'.");
+            }
+
+            run.CompletedUtc = DateTime.UtcNow;
+            run.Status = "Completed";
+            await repository.UpdateRunAsync(run);
+            Report($"Popular APIs scrape completed: {run.ListingsFound} listings, {run.PagesCrawled} pages captured.");
+        }
+        catch (OperationCanceledException)
+        {
+            run.Status = "Cancelled";
+            run.CompletedUtc = DateTime.UtcNow;
+            await repository.UpdateRunAsync(run);
+            throw;
         }
 
         return run;

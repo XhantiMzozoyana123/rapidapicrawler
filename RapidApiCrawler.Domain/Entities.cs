@@ -27,7 +27,7 @@ public class CrawledPage
 {
     public int Id { get; set; }
     public int ListingId { get; set; }
-    /// <summary>Playground | ApiHome | Discussions</summary>
+    /// <summary>Discussions list page snapshot</summary>
     public string PageType { get; set; } = string.Empty;
     public string Url { get; set; } = string.Empty;
     public string Html { get; set; } = string.Empty;

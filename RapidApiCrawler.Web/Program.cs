@@ -1,3 +1,6 @@
+using Hangfire;
+using Hangfire.Dashboard;
+using Hangfire.MemoryStorage;
 using RapidApiCrawler.Application;
 using RapidApiCrawler.Infrastructure;
 using RapidApiCrawler.Web.Services;
@@ -20,16 +23,30 @@ builder.Services.AddSingleton<ScraperOptions>();
 builder.Services.AddSingleton<ILlmAnalyzer, LlamaSharpLlmClient>();
 builder.Services.AddSingleton<IRapidApiClient, PlaywrightRapidApiClient>();
 
-// MySQL repository (connection string from env var or config)
-builder.Services.AddSingleton(new MySqlOptions(
+// MySQL repository (EF Core code-first; connection string from env var or config)
+var mySqlConnection =
     Environment.GetEnvironmentVariable("MYSQL_CONNECTION_STRING") ??
-    builder.Configuration["MySql:ConnectionString"] ?? string.Empty));
-builder.Services.AddSingleton<ISearchRunRepository>(sp =>
-    new MySqlSearchRunRepository(sp.GetRequiredService<MySqlOptions>()));
+    builder.Configuration.GetConnectionString("DefaultConnection") ??
+    builder.Configuration["MySql:ConnectionString"] ??
+    string.Empty;
+builder.Services.AddRapidApiDatabase(mySqlConnection);
 
 builder.Services.AddSingleton<ICsvExporter, CsvExporter>();
 builder.Services.AddSingleton<CrawlOrchestrator>();
-builder.Services.AddSingleton<CrawlSessionStore>();
+
+// ---- Hangfire: background jobs + recurring cron scheduler ----
+// The recurring job definition is registered below on every startup, so the schedule
+// is always re-created even though the storage is in-memory.
+builder.Services.AddHangfire(config => config
+    .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    .UseMemoryStorage());
+builder.Services.AddHangfireServer(options =>
+    options.WorkerCount = builder.Configuration.GetValue("Hangfire:Workers", 2));
+
+builder.Services.AddSingleton<CrawlJobCoordinator>();
+builder.Services.AddTransient<CrawlJobService>();
 
 var app = builder.Build();
 
@@ -45,6 +62,15 @@ app.UseRouting();
 
 app.UseAuthorization();
 
+// Hangfire Dashboard (route, e.g. /hangfire) guarded by an optional shared secret.
+app.UseHangfireDashboard(
+    builder.Configuration["Hangfire:DashboardRoute"] ?? "/hangfire",
+    new DashboardOptions
+    {
+        Authorization = new[] { new HangfireAuthorizationFilter(builder.Configuration) },
+        DashboardTitle = "RapidAPI Crawler Jobs",
+    });
+
 app.MapStaticAssets();
 
 app.MapControllerRoute(
@@ -52,5 +78,21 @@ app.MapControllerRoute(
     pattern: "{controller=Home}/{action=Index}/{id?}")
     .WithStaticAssets();
 
+// ---- Register the recurring cron job that runs the crawler on a schedule ----
+var cronJobId = "rapidapi-crawl";
+var cronKeyword = builder.Configuration["Hangfire:DefaultKeyword"] ?? "instagram scraper";
+var cronExpression = builder.Configuration["Hangfire:Cron"] ?? "0 */4 * * *";
+var cronAnalyze = builder.Configuration.GetValue("Hangfire:RunAnalysis", false);
+var maxListings = builder.Configuration.GetValue("Hangfire:MaxListings", 200);
+
+RecurringJob.AddOrUpdate<CrawlJobService>(
+    cronJobId,
+    job => job.RunCrawlAsync(cronJobId, cronKeyword!, cronAnalyze, maxListings, true),
+    cronExpression,
+    new RecurringJobOptions { TimeZone = TimeZoneInfo.Utc });
+
+app.Logger.LogInformation("Hangfire cron job '{JobId}' scheduled: cron='{Cron}', keyword='{Keyword}'. " +
+                          "Dashboard at {Route}", cronJobId, cronExpression, cronKeyword,
+                          builder.Configuration["Hangfire:DashboardRoute"] ?? "/hangfire");
 
 app.Run();
