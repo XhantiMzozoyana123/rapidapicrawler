@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="RapidApiCrawler.Application/RapidApiCrawler.Application.csproj" />
+  <Project Path="RapidApiCrawler.Cli/RapidApiCrawler.Cli.csproj" />
+  <Project Path="RapidApiCrawler.Domain/RapidApiCrawler.Domain.csproj" />
+  <Project Path="RapidApiCrawler.Infrastructure/RapidApiCrawler.Infrastructure.csproj" />
+  <Project Path="RapidApiCrawler.Web/RapidApiCrawler.Web.csproj" />
+  <Project Path="RapidApiCrawler/RapidApiCrawler.csproj" />
+</Solution>

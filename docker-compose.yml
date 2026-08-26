@@ -1,0 +1,48 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: rapidapi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass123
+      MYSQL_DATABASE: RapidApiCrawler
+      MYSQL_USER: rapidapi
+      MYSQL_PASSWORD: your_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass123"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: .
+    container_name: rapidapi-web
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      MYSQL_CONNECTION_STRING: "server=mysql;database=RapidApiCrawler;uid=rapidapi;pwd=your_password;SslMode=none;"
+      LLAMA_MODEL_PATH: "/models/model.gguf"
+      ASPNETCORE_ENVIRONMENT: Production
+    volumes:
+      - ./models:/models:ro            # put your .gguf file here on the host
+    # Give the container access to the NVIDIA GPU (requires NVIDIA Container Toolkit
+    # on the host + a working driver). Modern Compose syntax.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1                 # the RTX A4000
+              capabilities: [gpu]
+
+volumes:
+  mysql_data:

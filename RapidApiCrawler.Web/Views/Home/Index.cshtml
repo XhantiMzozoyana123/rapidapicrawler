@@ -1,0 +1,107 @@
+﻿@using RapidApiCrawler.Domain
+@model List<SearchRun>
+@{
+    ViewData["Title"] = "RapidAPI Competitor Research";
+    var snap = (RapidApiCrawler.Web.Services.CrawlSnapshot)ViewBag.Snapshot!;
+}
+
+<div class="row">
+    <div class="col-lg-5">
+        <h4 class="mb-3">Start a crawl</h4>
+        <form asp-action="Start" method="post">
+            <div class="mb-3">
+                <label class="form-label">Keyword</label>
+                <input type="text" name="keyword" class="form-control" placeholder="e.g. instagram scraper" required value="@snap.Keyword" />
+            </div>
+            <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" role="switch" id="analyze" name="analyze" checked>
+                <label class="form-check-label" for="analyze">Run AI gap analysis (Gemini)</label>
+            </div>
+            <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" role="switch" id="headless" name="headless">
+                <label class="form-check-label" for="headless">Headless browser (off = watch the browser)</label>
+            </div>
+            <button type="submit" class="btn btn-primary" id="startBtn" @(snap.IsRunning ? "disabled" : "")>
+                @(snap.IsRunning ? "Crawl running…" : "Start Crawl")
+            </button>
+        </form>
+
+        <hr />
+        <h5>Live progress</h5>
+        <div id="status" class="fs-6 fw-bold">@snap.Status</div>
+        <div id="stats" class="text-muted small">@snap.ListingsFound listings &middot; @snap.PagesCrawled pages</div>
+        <ul id="log" class="mt-2 list-unstyled small" style="max-height:340px; overflow-y:auto; font-family: monospace;">
+            @foreach (var msg in snap.Messages)
+            {
+                <li>@msg</li>
+            }
+        </ul>
+    </div>
+
+    <div class="col-lg-7">
+        <h4 class="mb-3">Recent runs</h4>
+        @if (!Model.Any())
+        {
+            <p class="text-muted">No runs yet.</p>
+        }
+        else
+        {
+            <table class="table table-sm table-striped">
+                <thead><tr><th>#</th><th>Keyword</th><th>Started</th><th>Status</th><th>Listings</th><th>Pages</th></tr></thead>
+                <tbody>
+                @foreach (var r in Model)
+                {
+                    <tr>
+                        <td>@r.Id</td>
+                        <td>@r.Keyword</td>
+                        <td>@r.StartedUtc.ToLocalTime()</td>
+                        <td><span class="badge text-bg-secondary">@r.Status</span></td>
+                        <td>@r.ListingsFound</td>
+                        <td>@r.PagesCrawled</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@section Scripts {
+<script>
+    var knownCount = 0; // how many log lines we've already rendered
+    (function initLog() {
+        knownCount = document.getElementById('log').children.length;
+    })();
+
+    function refreshProgress() {
+        fetch('@Url.Action("Progress")', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.json())
+            .then(s => {
+                document.getElementById('status').textContent = s.status;
+                document.getElementById('stats').textContent = s.listingsFound + ' listings · ' + s.pagesCrawled + ' pages';
+                var log = document.getElementById('log');
+                var msgs = s.messages || [];
+                // Append only messages we haven't rendered yet.
+                for (var i = knownCount; i < msgs.length; i++) {
+                    var li = document.createElement('li');
+                    li.textContent = msgs[i];
+                    log.appendChild(li);
+                }
+                knownCount = msgs.length;
+                log.scrollTop = log.scrollHeight;
+
+                var btn = document.getElementById('startBtn');
+                if (s.isRunning) {
+                    btn.disabled = true;
+                    btn.textContent = 'Crawl running…';
+                    setTimeout(refreshProgress, 1500);
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = 'Start Crawl';
+                }
+            })
+            .catch(() => {});
+    }
+    if (@(snap.IsRunning ? "true" : "false")) { refreshProgress(); }
+</script>
+}

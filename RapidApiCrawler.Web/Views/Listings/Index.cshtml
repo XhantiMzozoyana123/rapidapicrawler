@@ -1,0 +1,44 @@
+@using RapidApiCrawler.Domain
+@model List<ApiListing>
+@{
+    ViewData["Title"] = "Listings";
+    var runs = (List<SearchRun>)ViewBag.Runs!;
+}
+
+<h4 class="mb-3">Scraped listings</h4>
+<p class="mb-3">
+    <a asp-action="Index" asp-route-runId="" class="btn btn-sm @(ViewBag.SelectedRunId == null ? "btn-primary" : "btn-outline-primary")">All runs</a>
+    @foreach (var r in runs)
+    {
+        <a asp-action="Index" asp-route-runId="@r.Id" class="btn btn-sm @((int?)ViewBag.SelectedRunId == r.Id ? "btn-primary" : "btn-outline-primary")">Run #@r.Id (@r.Keyword)</a>
+    }
+</p>
+
+@if (!Model.Any())
+{
+    <p class="text-muted">No listings found yet — run a crawl first.</p>
+}
+else
+{
+    <table class="table table-sm table-striped">
+        <thead>
+            <tr>
+                <th>Run</th><th>Name</th><th>Provider</th><th>Slug</th><th>Page</th><th>Link</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var l in Model)
+        {
+            <tr>
+                <td>@l.SearchRunId</td>
+                <td>@l.Name</td>
+                <td>@l.Provider</td>
+                <td><code>@l.ApiSlug</code></td>
+                <td>@l.SearchPage</td>
+                <td><a href="https://rapidapi.com@l.RelativeUrl" target="_blank">open</a></td>
+            </tr>
+        }
+        </tbody>
+    </table>
+    <p class="text-muted small">@Model.Count listing(s).</p>
+}

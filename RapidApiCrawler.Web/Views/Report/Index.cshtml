@@ -1,0 +1,24 @@
+@using RapidApiCrawler.Web.Models
+@model ReportViewModel
+@{
+    ViewData["Title"] = "Report";
+    var runs = (List<RapidApiCrawler.Domain.SearchRun>)ViewBag.Runs!;
+    var selected = Model.RunId;
+}
+
+<h4 class="mb-3">AI Gap Analysis Report</h4>
+<p class="mb-3">
+    @foreach (var r in runs)
+    {
+        <a asp-action="Index" asp-route-runId="@r.Id" class="btn btn-sm @(selected == r.Id ? "btn-primary" : "btn-outline-primary")">Run #@r.Id (@r.Keyword)</a>
+    }
+</p>
+
+@if (string.IsNullOrWhiteSpace(Model.Report))
+{
+    <p class="text-muted">No report available — run a crawl with the AI analysis toggle enabled.</p>
+}
+else
+{
+    <pre style="white-space:pre-wrap; font-family: inherit;">@Model.Report</pre>
+}

@@ -1,0 +1,59 @@
+@using RapidApiCrawler.Domain
+@model TableResult
+@{
+    ViewData["Title"] = "Database";
+    var tables = (List<string>)ViewBag.Tables!;
+    var selected = (string?)ViewBag.SelectedTable;
+}
+
+<h4 class="mb-3">Database tables</h4>
+<p class="mb-3">
+    @foreach (var t in tables)
+    {
+        <a asp-action="Index" asp-route-table="@t" class="btn btn-sm @(t == selected ? "btn-primary" : "btn-outline-primary")">@t</a>
+        <a asp-controller="Export" asp-action="Table" asp-route-table="@t" class="btn btn-sm btn-outline-secondary ms-0" title="Download @(t).csv">⬇</a>
+    }
+</p>
+
+@if (TempData["ExportMessage"] is string em)
+{
+    <div class="alert alert-info">@em</div>
+}
+
+@if (Model.Columns.Length == 0)
+{
+    <p class="text-muted">No tables with data yet — run a crawl first.</p>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm table-bordered">
+            <thead>
+                <tr>
+                    @foreach (var col in Model.Columns)
+                    {
+                        <th>@col</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in Model.Rows)
+                {
+                    <tr>
+                        @foreach (var cell in row)
+                        {
+                            var text = cell switch
+                            {
+                                null => "(null)",
+                                string s when s.Length > 120 => s[..120] + "…",
+                                var v => v.ToString() ?? ""
+                            };
+                            <td style="max-width:300px; overflow-wrap:anywhere;">@text</td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <p class="text-muted small">Showing @Model.Rows.Count row(s) (up to 300). Download the full CSV with the ⬇ button.</p>
+}
