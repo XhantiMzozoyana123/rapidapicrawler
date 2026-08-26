@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using LLama;
 using LLama.Common;
 using LLama.Native;
@@ -117,6 +119,61 @@ Report:";
         }
         _lock.Dispose();
         GC.SuppressFinalize(this);
+    }
+}
+
+/// <summary>
+/// AI analyzer backed by a remote Ollama server (e.g. running on the VPS host).
+/// Talks plain HTTP to /api/generate — no local model loading, no GGUF files, no LLamaSharp.
+/// Configuration: OLLAMA_URL (default http://127.0.0.1:11434) + OLLAMA_MODEL (default llama3).
+/// </summary>
+public class OllamaLlmClient : ILlmAnalyzer
+{
+    private readonly HttpClient _http;
+    private readonly string _url;
+    private readonly string _model;
+
+    public OllamaLlmClient(HttpClient http)
+    {
+        _http = http;
+        var baseUrl = Environment.GetEnvironmentVariable("OLLAMA_URL")
+                      ?? "http://127.0.0.1:11434";
+        // Tolerate endpoints supplied with or without the /api/generate suffix.
+        _url = baseUrl.TrimEnd('/').EndsWith("/api/generate", StringComparison.OrdinalIgnoreCase)
+            ? baseUrl.TrimEnd('/')
+            : baseUrl.TrimEnd('/') + "/api/generate";
+        _model = Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? "llama3";
+    }
+
+    public async Task<string> AnalyzeAsync(string keyword, string combinedContext, CancellationToken ct = default)
+    {
+        var prompt =
+            $@"You are a market research analyst specializing in API marketplaces.
+A competitor scan of RapidAPI for the keyword ""{keyword}"" found these APIs:
+{combinedContext}
+
+Produce a concise competitor gap-analysis report in Markdown with these sections:
+1. Market Overview  2. Competitor Landscape (table)  3. Gaps & Underserved Needs
+4. Recommended APIs to Build (top 3 ideas, each with target users, key endpoints, differentiation)
+5. Risks. Be specific and actionable.
+
+Report:";
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            model = _model,
+            prompt,
+            stream = false,
+            options = new { num_predict = 1200 }
+        });
+
+        using var response = await _http.PostAsync(_url,
+            new StringContent(payload, Encoding.UTF8, "application/json"), ct);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+        return doc.RootElement.GetProperty("response").GetString()?.Trim() ?? "";
     }
 }
 

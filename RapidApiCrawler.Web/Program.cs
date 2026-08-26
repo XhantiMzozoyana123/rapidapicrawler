@@ -18,17 +18,14 @@ builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo("/app/data/keys"));
 
 // ---- RapidApiCrawler services (shared clean-architecture layers) ----
-var llamaModelPath = Environment.GetEnvironmentVariable("LLAMA_MODEL_PATH") ?? builder.Configuration["Llama:ModelPath"] ?? "";
-builder.Services.AddSingleton(new LlamaOptions
-{
-    ModelPath = llamaModelPath,
-    ContextSize = builder.Configuration.GetValue("Llama:ContextSize", 4096),
-    MaxTokens = builder.Configuration.GetValue("Llama:MaxTokens", 1200),
-    GpuLayerCount = builder.Configuration.GetValue("Llama:GpuLayerCount", 999),
-    FlashAttention = builder.Configuration.GetValue("Llama:FlashAttention", true),
-});
 builder.Services.AddSingleton<ScraperOptions>();
-builder.Services.AddSingleton<ILlmAnalyzer, LlamaSharpLlmClient>();
+// AI analysis runs against an existing Ollama server (VPS): OLLAMA_URL + OLLAMA_MODEL env vars.
+var ollamaBase = Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://127.0.0.1:11434";
+builder.Services.AddHttpClient<ILlmAnalyzer, OllamaLlmClient>(c =>
+{
+    c.BaseAddress = new Uri(ollamaBase);
+    c.Timeout = TimeSpan.FromMinutes(15); // large models can take a while per report
+});
 builder.Services.AddSingleton<IRapidApiClient, PlaywrightRapidApiClient>();
 
 // MySQL repository (EF Core code-first; connection string from env var or config)
