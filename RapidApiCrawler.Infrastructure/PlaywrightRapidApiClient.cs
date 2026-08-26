@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Playwright;
 using RapidApiCrawler.Application;
 using RapidApiCrawler.Domain;
