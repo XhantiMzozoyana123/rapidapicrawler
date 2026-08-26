@@ -37,6 +37,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
     volumes:
       - ./models:/models:ro            # put your .gguf file here on the host
+      - web_data:/app/data             # persisted DataProtection keys (stable antiforgery across restarts)
     # Give the container access to the NVIDIA GPU (requires NVIDIA Container Toolkit
     # on the host + a working driver). Modern Compose syntax.
     deploy:
@@ -49,3 +50,4 @@ services:
 
 volumes:
   mysql_data:
+  web_data:

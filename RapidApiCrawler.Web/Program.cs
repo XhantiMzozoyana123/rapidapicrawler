@@ -9,6 +9,12 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllersWithViews();
 
+// Persist DataProtection keys so antiforgery tokens survive container restarts
+// (otherwise every restart invalidates all open pages' form tokens: "The key ...
+// was not found in the key ring" on POST).
+builder.Services.AddDataProtection(options => options.ApplicationName = "RapidApiCrawler")
+    .PersistKeysToFileSystem(new DirectoryInfo("/app/data/keys"));
+
 // ---- RapidApiCrawler services (shared clean-architecture layers) ----
 var llamaModelPath = Environment.GetEnvironmentVariable("LLAMA_MODEL_PATH") ?? builder.Configuration["Llama:ModelPath"] ?? "";
 builder.Services.AddSingleton(new LlamaOptions
