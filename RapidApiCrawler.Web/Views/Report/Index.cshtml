@@ -26,7 +26,7 @@
 {
     <form asp-action="Generate" asp-route-runId="@selected" method="post" class="mb-3">
         <button type="submit" class="btn btn-success btn-sm"
-                onclick="this.disabled=true; this.textContent='Generating… (progress shown below)'; sessionStorage.setItem('analysisRunning_@selected','1');">
+                onclick="this.disabled=true; this.textContent='Generating… (progress shown below)';">
             🤖 Generate / regenerate report for run #@selected
         </button>
         @if (!ollamaConfigured)
@@ -37,23 +37,22 @@
         }
     </form>
 
-    @* Live AI-analysis progress: polled from /Report/AnalysisProgress while the job runs *@
-    <div id="analysis-progress-panel" class="card mb-3 border-primary d-none">
+    @* AI-analysis progress — always visible as part of the page. The polling script
+       below only updates its text/width/colors; it never shows/hides anything. *@
+    <div id="analysis-progress-panel" class="card mb-3 border-secondary">
         <div class="card-body py-3">
             <div class="d-flex justify-content-between mb-1">
-                <strong>
-                    <span class="spinner-border spinner-border-sm text-primary me-2" role="status"
-                          id="analysis-progress-spinner"></span>AI Gap Analysis — run #@selected
+                <strong>AI Gap Analysis — run #@selected
+                    <span id="analysis-progress-status" class="badge bg-secondary ms-2">idle</span>
                 </strong>
-                <span id="analysis-progress-percent" class="fw-bold">0%</span>
+                <span id="analysis-progress-percent" class="fw-bold">—</span>
             </div>
             <div class="progress mb-2" style="height: 1.4rem;">
                 <div id="analysis-progress-bar"
-                     class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+                     class="progress-bar bg-secondary"
                      role="progressbar" style="width: 0%">0%</div>
             </div>
-            <small id="analysis-progress-step" class="text-muted">Waiting to start…</small>
-            <div id="analysis-progress-error" class="text-danger small mt-2 d-none"></div>
+            <small id="analysis-progress-step" class="text-muted">No analysis running.</small>
         </div>
     </div>
 }
@@ -75,63 +74,57 @@ else
     <script>
         (function () {
             const runId = @selected;
-            const panel = document.getElementById('analysis-progress-panel');
             const bar = document.getElementById('analysis-progress-bar');
             const percentLabel = document.getElementById('analysis-progress-percent');
             const stepLabel = document.getElementById('analysis-progress-step');
-            const errorBox = document.getElementById('analysis-progress-error');
+            const statusBadge = document.getElementById('analysis-progress-status');
             let reloaded = false;
 
-            function showPanel(visible) { panel.classList.toggle('d-none', !visible); }
+            function setBar(pct, color, animated) {
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+                bar.className = 'progress-bar' +
+                    (animated ? ' progress-bar-striped progress-bar-animated' : '') +
+                    (color ? ' ' + color : '');
+            }
 
             async function poll() {
                 try {
                     const res = await fetch('@Url.Action("AnalysisProgress", "Report")?runId=' + runId, { cache: 'no-store' });
                     const data = await res.json();
+                    statusBadge.textContent = data.status;
 
                     if (data.status === 'running') {
-                        sessionStorage.setItem('analysisRunning_' + runId, '1');
-                        showPanel(true);
-                        errorBox.classList.add('d-none');
-                        bar.classList.add('progress-bar-animated');
-                        const pct = Number(data.percent) || 0;
-                        bar.style.width = pct + '%';
-                        bar.textContent = pct + '%';
-                        percentLabel.textContent = pct + '%';
+                        statusBadge.className = 'badge bg-primary ms-2';
+                        setBar(Number(data.percent) || 0, 'bg-primary', true);
+                        percentLabel.textContent = (Number(data.percent) || 0) + '%';
                         let stepText = data.message || '';
                         if (data.totalRequests > 0) {
                             stepText += ` (${data.completedRequests}/${data.totalRequests} LLM requests done)`;
                         }
                         stepLabel.textContent = stepText;
                     } else if (data.status === 'completed') {
-                        sessionStorage.removeItem('analysisRunning_' + runId);
-                        showPanel(false);
-                        // The report is on disk now — reload once so it renders.
+                        statusBadge.className = 'badge bg-success ms-2';
+                        setBar(100, 'bg-success', false);
+                        percentLabel.textContent = '100%';
+                        stepLabel.textContent = '✅ Report ready — the output is below. Generate again to rebuild it.';
+                        // Refresh once so the saved report renders.
                         if (!reloaded && !document.querySelector('.alert-danger')) {
                             reloaded = true;
                             location.reload();
                         }
                     } else if (data.status === 'failed') {
-                        sessionStorage.removeItem('analysisRunning_' + runId);
-                        showPanel(true);
-                        bar.classList.remove('progress-bar-animated');
-                        bar.style.width = '100%';
-                        bar.className = 'progress-bar bg-danger';
-                        bar.textContent = 'Failed';
+                        statusBadge.className = 'badge bg-danger ms-2';
+                        setBar(100, 'bg-danger', false);
                         percentLabel.textContent = '';
-                        stepLabel.textContent = '';
-                        errorBox.textContent = data.message || 'The analysis failed. Check the container logs.';
-                        errorBox.classList.remove('d-none');
+                        stepLabel.textContent = data.message || 'The analysis failed — check the container logs.';
                     } else {
-                        showPanel(false);
+                        statusBadge.className = 'badge bg-secondary ms-2';
+                        setBar(0, 'bg-secondary', false);
+                        percentLabel.textContent = '—';
+                        stepLabel.textContent = 'No analysis running. Click “Generate / regenerate report” above to start one.';
                     }
                 } catch (err) { /* transient network hiccup — keep polling */ }
-            }
-
-            // Resume polling when arriving back on the page mid-generation
-            // (the Generate button sets this flag before its POST round-trip).
-            if (sessionStorage.getItem('analysisRunning_' + runId)) {
-                showPanel(true);
             }
 
             poll();
