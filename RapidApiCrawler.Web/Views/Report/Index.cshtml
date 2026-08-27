@@ -46,9 +46,8 @@
 {
     <div class="mb-3">
         <label class="form-label mb-1 fw-semibold">2️⃣ Generate the AI gap-analysis</label>
-        <div>
-            <button type="submit" form="generate-form" class="btn btn-success"
-                    onclick="this.disabled=true; this.textContent='Generating… (watch progress below)';">
+        <form asp-action="Generate" asp-route-runId="@selected" method="post" class="mb-0">
+            <button type="submit" class="btn btn-success">
                 🤖 Generate / regenerate report for run #@selected
             </button>
             @if (!ollamaConfigured)
@@ -57,11 +56,8 @@
                     ⚠ Ollama not configured — set OLLAMA_URL and OLLAMA_MODEL env vars.
                 </span>
             }
-        </div>
+        </form>
     </div>
-
-    @* Separate form so the select above and this button are clearly distinct steps *@
-    <form id="generate-form" asp-action="Generate" asp-route-runId="@selected" method="post"></form>
 
     @* AI-analysis progress — always visible as part of the page. The polling script
        below only updates its text/width/colors; it never shows/hides anything. *@
