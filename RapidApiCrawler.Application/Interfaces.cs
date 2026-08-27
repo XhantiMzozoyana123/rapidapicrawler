@@ -63,8 +63,9 @@ public interface ISearchRunRepository
 
     /// <summary>All structured customer-voice rows extracted for a run.</summary>
     Task<List<CustomerFeedback>> GetCustomerFeedbackAsync(int runId);
-    Task<List<SearchRun>> GetRunsAsync();
+        Task<List<SearchRun>> GetRunsAsync();
     Task<string?> GetLatestReportAsync(int runId);
+    Task<string?> GetLatestReportAsync(int runId, string model);
     Task<int> CountPagesAsync(int runId);
     Task<List<string>> GetTableNamesAsync();
     Task<TableResult> QueryTableAsync(string tableName, int? limit = 200);

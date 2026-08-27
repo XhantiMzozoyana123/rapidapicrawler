@@ -43,7 +43,7 @@ public partial class CrawlOrchestrator(
     public event EventHandler<AnalysisProgressEventArgs>? AnalysisProgress;
 
     /// <summary>Number of report sections emitted by <see cref="BuildSectionPrompts"/>.</summary>
-    private const int SectionCount = 8;
+    private const int SectionCount = 7;
 
     private static readonly Regex TokenCountRegex =
         new(@"^Generating\.\.\.\s+(\d+) tokens", RegexOptions.Compiled);
@@ -263,7 +263,6 @@ public partial class CrawlOrchestrator(
                $"({feedbackRequests} LLM call(s)).");
 
         var verifiedVoiceFacts = BuildVerifiedVoiceFacts(feedbackRows);
-        var verifiedKeywordFacts = BuildKeywordFacts(listings, overviewTextByListing, feedbackRows);
 
         // ---- Build one rich, self-contained profile block per API ----
         // The block bundles identity + overview + that API's OWN customer comments, so the
@@ -417,7 +416,7 @@ Summary of notable APIs, themes and customer feedback:";
                     if (total > 0)
                     {
                         double pctDirectAdj = Math.Round(100.0 * (direct + adjacent) / total, 1);
-                        verifiedFacts = verifiedVoiceFacts + "\n" + verifiedKeywordFacts +
+                        verifiedFacts = verifiedVoiceFacts +
                             $"\nVERIFIED CLASSIFICATION COUNTS (computed programmatically from the classified table — cite these figures exactly): " +
                             $"{total} APIs listed: DIRECT={direct}, ADJACENT={adjacent}, IRRELEVANT={irrelevant}. " +
                             $"Relevant (direct+adjacent) = {pctDirectAdj}% of the listed set.";
@@ -623,6 +622,80 @@ Example item: {{""slug"":""youtube138"",""sentiment"":""negative"",""topic"":""p
         }
         return (items, requestCount);
     }
+    /// <summary>
+    /// Standalone Keyword Intelligence strategy (own page, independent of the report
+    /// generator): computes keyword statistics deterministically, then has the LLM
+    /// interpret them into semantic clusters + listing keyword recommendations.
+    /// The strategy text is persisted as an AnalysisReport with Model="keyword-strategy".
+    /// </summary>
+    public async Task<string> GenerateKeywordStrategyAsync(int runId, CancellationToken ct = default)
+    {
+        var listings = await repository.GetListingsAsync(runId);
+        if (listings.Count == 0)
+            throw new InvalidOperationException($"Run #{runId} has no listings to analyze.");
+
+        var run = (await repository.GetRunsAsync()).FirstOrDefault(r => r.Id == runId)
+                ?? throw new InvalidOperationException($"Run #{runId} not found.");
+
+        // --- emit structured progress so the Keyword Strategy page shows live feedback ---
+        void FireProgress(int done, int tokens, int budget, string step) =>
+            AnalysisProgress?.Invoke(this, new AnalysisProgressEventArgs(
+                runId, done, 2, tokens, budget, step));
+
+        Report($"Keyword strategy: extracting competitor overviews for run #{runId} '{run.Keyword}'...");
+        FireProgress(0, 0, 1, "Reading and indexing competitor keywords");
+        var pages = await repository.GetPagesForRunAsync(runId);
+        var overviewTextByListing = new Dictionary<int, string>();
+        foreach (var g in pages.Where(p => p.PageType == "ApiOverview").GroupBy(p => p.ListingId))
+        {
+            var text = ExtractCommentText(string.Join(" ", g.OrderBy(p => p.Id).Select(p => p.Html)));
+            if (text.Length > 0)
+                overviewTextByListing[g.Key] = text.Length > 800 ? text[..800] : text;
+        }
+        var feedbackRows = await repository.GetCustomerFeedbackAsync(runId);
+
+        var stats = KeywordAnalyzer.ComputeStats(listings, overviewTextByListing, feedbackRows);
+        if (stats.Count == 0)
+            throw new InvalidOperationException("Not enough captured overview data to compute keyword statistics for this run.");
+
+        var facts = KeywordAnalyzer.BuildFacts(stats);
+        Report($"Keyword strategy: interpreting {stats.Count} verified keyword stats for run #{runId} '{run.Keyword}'...");
+        FireProgress(0, 0, 900, "Interpreting keyword data into SEO clusters & recommendations");
+
+        var prompt = $@"You are an SEO and marketplace-listing strategist for RapidAPI. Below are
+VERIFIED KEYWORD DATA — deterministic term/phrase frequencies from competitor listing overviews
+for the ""{run.Keyword}"" market, cross-referenced with extracted customer-signal mentions.
+Your job:
+1. Group related terms into semantic clusters (e.g. 'web scraping' + 'website scraper' +
+   'data extraction' → cluster 'Website Data Extraction') and pick a PRIMARY keyword per
+   cluster based on the coverage/demand numbers.
+2. Identify OPPORTUNITY keywords: low overview coverage + high customer-signal mentions
+   (differentiation), or high coverage + high demand (table stakes — must include).
+3. Recommend 5-8 keywords/phrases for a NEW API listing targeting ""{run.Keyword}"", each with
+   a one-line rationale citing its verified numbers.
+4. Add a short 'Listing Copy Hints' subsection: how the top opportunity keywords should appear
+   in a listing name, short description, and long description (respecting RapidAPI's rule that
+   listing names must not contain the word 'API').
+Do NOT invent keywords not present in the verified data. Every number you cite must match it.
+
+{facts}
+
+Keyword Strategy:";
+
+        var strategy = await analyzer.CompleteAsync(prompt, 900, NullProgress.Instance, ct);
+
+        await repository.AddReportAsync(new AnalysisReport
+        {
+            SearchRunId = runId,
+            Model = "keyword-strategy",
+            ReportText = strategy.Trim()
+        });
+
+        FireProgress(2, 0, 0, "Keyword strategy saved.");
+        Report("Keyword strategy saved.");
+        return strategy.Trim();
+    }
+
     private static List<CustomerFeedback> ParseFeedbackJson(
         string raw, Dictionary<string, ApiListing> slugToListing)
     {
@@ -855,23 +928,7 @@ computed programmatically and outrank your estimates. Never invent percentages.{
 
 Market Overview:", 300),
 
-            ("4. Keyword Intelligence (computed statistics)",
-             $@"Below are VERIFIED KEYWORD DATA — deterministic term/phrase frequencies from
-competitor listing overviews, cross-referenced with customer-signal mentions. Your job:
-1. Group related terms into semantic clusters (e.g. 'web scraping' + 'website scraper' +
-   'data extraction' → cluster 'Website Data Extraction') and pick a PRIMARY keyword per
-   cluster based on the coverage/demand numbers.
-2. Identify OPPORTUNITY keywords: low overview coverage + high customer-signal mentions
-   (differentiation), or high coverage + high demand (table stakes — must include).
-3. Recommend 5-8 keywords/phrases for a NEW API listing targeting ""{keyword}"", each with
-   a one-line rationale citing its verified numbers.
-Do NOT invent keywords not present in the verified data.{GroundingRules}
-
-{{verifiedFacts}}
-
-Keyword Intelligence:", 550),
-
-            ("5. Gaps & Underserved Needs (evidence-ranked)",
+            ("4. Gaps & Underserved Needs (evidence-ranked)",
              $@"Identify EXACTLY 4 specific market gaps for keyword ""{keyword}"" on RapidAPI.
 Use ONLY APIs classified DIRECT or ADJACENT — their reviews may be cited; nothing from an
 IRRELEVANT API may support any gap. For EACH gap output:
@@ -888,7 +945,7 @@ Order gaps by strength of supporting evidence (strongest OBSERVED first).{Ground
 
 Gaps & Underserved Needs:", 600),
 
-            ("6. Recommended API Opportunities (evidence-scored)",
+            ("5. Recommended API Opportunities (evidence-scored)",
              $@"Propose API product opportunities for ""{keyword}"", ranked best-first. Produce
 TWO OR THREE ideas — never pad to three with a weakly-supported one; if only two have real
 evidence behind them, return two and say so. Format EACH idea exactly:
@@ -909,7 +966,7 @@ Base opportunities ONLY on DIRECT/ADJACENT APIs and their captured reviews. Comp
 
 Recommended API Opportunities:", 900),
 
-            ("7. Risks & Data Limitations",
+            ("6. Risks & Data Limitations",
              $@"Identify 3 key risks for building APIs in the ""{keyword}"" space (platform
 dependency, rate limits, saturation...) using only relevant-API evidence, THEN add a final
 subsection '## Analysis Limitations' honestly listing what this report does NOT know: which
@@ -922,7 +979,7 @@ inference.{GroundingRules}
 
 Risks & Data Limitations:", 450),
 
-            ("8. Estimated Market Size",
+            ("7. Estimated Market Size",
              $@"Estimate the total addressable market size for API products serving the
 ""{keyword}"" space. Follow this EXACT structure:
 - Data basis (OBSERVED): <what the crawl actually shows — count of DIRECT+ADJACENT APIs,

@@ -260,5 +260,15 @@ public class MySqlSearchRunRepository : ISearchRunRepository
         return total;
     }
 
-    public void Dispose() { /* contexts are created per operation and disposed by the factory */ }
+            public async Task<string?> GetLatestReportAsync(int runId, string model)
+    {
+        await using var ctx = _factory.CreateDbContext();
+        return await ctx.AnalysisReports
+            .Where(r => r.SearchRunId == runId && r.Model == model)
+            .OrderByDescending(r => r.Id)
+            .Select(r => r.ReportText)
+            .FirstOrDefaultAsync();
+    }
+
+    public void Dispose() { }
 }

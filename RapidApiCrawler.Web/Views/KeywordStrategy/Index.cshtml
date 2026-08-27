@@ -1,0 +1,148 @@
+@using RapidApiCrawler.Web.Models
+@model KeywordStrategyViewModel
+@{
+    ViewData["Title"] = "Keyword Strategy";
+    var runs = (List<RapidApiCrawler.Domain.SearchRun>)ViewBag.Runs!;
+    var selected = Model.RunId;
+    var ollamaConfigured = (bool)ViewBag.OllamaConfigured!;
+}
+
+<h4 class="mb-3">SEO Keyword Strategy</h4>
+
+@if (TempData["StrategyStarted"] is string msg)
+{
+    <div class="alert alert-info">@msg</div>
+}
+
+<div class="row g-2 align-items-end mb-3">
+    <div class="col-md-6">
+        <label for="run-select" class="form-label mb-1 fw-semibold">
+            1️⃣ Choose the crawl run to analyze
+        </label>
+                <select id="run-select" class="form-select"
+                onchange="if (this.value) window.location = '@Url.Action("Index", "KeywordStrategy")?runId=' + this.value;">
+            @if (!selected.HasValue)
+            {
+                <option value="" selected disabled>— Select a crawl run —</option>
+            }
+            @foreach (var r in runs.OrderByDescending(r => r.Id))
+            {
+                var started = r.StartedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+                if (selected == r.Id)
+                {
+                    <option value="@r.Id" selected>Run #@r.Id — "@r.Keyword" (@r.ListingsFound APIs, @started)</option>
+                }
+                else
+                {
+                    <option value="@r.Id">Run #@r.Id — "@r.Keyword" (@r.ListingsFound APIs, @started)</option>
+                }
+            }
+        </select>
+    </div>
+</div>
+
+@if (selected.HasValue)
+{
+    <div class="mb-3">
+        <label class="form-label mb-1 fw-semibold">2️⃣ Generate the keyword strategy</label>
+        <form asp-action="Generate" asp-route-runId="@selected" method="post" class="mb-0">
+            <button type="submit" class="btn btn-success">
+                🤖 Generate / regenerate keyword strategy for run #@selected
+            </button>
+            @if (!ollamaConfigured)
+            {
+                <span class="text-danger small ms-2">
+                    ⚠ Ollama not configured — set OLLAMA_URL and OLLAMA_MODEL env vars.
+                </span>
+            }
+        </form>
+    </div>
+
+    <div id="strategy-progress-panel" class="card mb-3 border-secondary">
+        <div class="card-body py-3">
+            <div class="d-flex justify-content-between mb-1">
+                <strong>Keyword Strategy Generation — run #@selected
+                    <span id="strategy-progress-status" class="badge bg-secondary ms-2">idle</span>
+                </strong>
+                <span id="strategy-progress-percent" class="fw-bold">—</span>
+            </div>
+            <div class="progress mb-2" style="height: 1.4rem;">
+                <div id="strategy-progress-bar"
+                     class="progress-bar bg-secondary"
+                     role="progressbar" style="width: 0%">0%</div>
+            </div>
+            <small id="strategy-progress-step" class="text-muted">No analysis running. Click Generate above to start one.</small>
+        </div>
+    </div>
+}
+
+@if (string.IsNullOrWhiteSpace(Model.Strategy))
+{
+    <p class="text-muted">
+        No keyword strategy available yet. Click <strong>Generate</strong> above — the AI analyzes
+        competitor keywords for this run and writes an SEO strategy here.
+    </p>
+}
+else
+{
+    <pre style="white-space:pre-wrap; font-family: inherit;">@Model.Strategy</pre>
+}
+
+@if (selected.HasValue)
+{
+    <script>
+        (function () {
+            const runId = @selected;
+            const bar = document.getElementById('strategy-progress-bar');
+            const percentLabel = document.getElementById('strategy-progress-percent');
+            const stepLabel = document.getElementById('strategy-progress-step');
+            const statusBadge = document.getElementById('strategy-progress-status');
+
+            function setBar(pct, color, animated) {
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+                bar.className = 'progress-bar' +
+                    (animated ? ' progress-bar-striped progress-bar-animated' : '') +
+                    (color ? ' ' + color : '');
+            }
+
+            async function poll() {
+                try {
+                    const res = await fetch('@Url.Action("AnalysisProgress", "KeywordStrategy")?runId=' + runId, { cache: 'no-store' });
+                    const data = await res.json();
+                    statusBadge.textContent = data.status;
+
+                    if (data.status === 'running') {
+                        statusBadge.className = 'badge bg-primary ms-2';
+                        setBar(Number(data.percent) || 0, 'bg-primary', true);
+                        percentLabel.textContent = (Number(data.percent) || 0) + '%';
+                        let stepText = data.message || '';
+                        if (data.totalRequests > 0) {
+                            stepText += ` (${data.completedRequests}/${data.totalRequests} LLM requests done)`;
+                        }
+                        stepLabel.textContent = stepText;
+                    } else if (data.status === 'completed') {
+                        statusBadge.className = 'badge bg-success ms-2';
+                        setBar(100, 'bg-success', false);
+                        percentLabel.textContent = '100%';
+                        stepLabel.textContent = '✅ Strategy ready — press F5 / refresh once to view it below.';
+                    } else if (data.status === 'failed') {
+                        statusBadge.className = 'badge bg-danger ms-2';
+                        setBar(100, 'bg-danger', false);
+                        percentLabel.textContent = '';
+                        stepLabel.textContent = data.message || 'The analysis failed. Check the container logs.';
+                    } else {
+                        statusBadge.className = 'badge bg-secondary ms-2';
+                        setBar(0, 'bg-secondary', false);
+                        percentLabel.textContent = '—';
+                        stepLabel.textContent = 'No analysis running. Click "Generate" above to start one.';
+                    }
+                } catch (err) { /* transient network hiccup */ }
+            }
+
+            poll();
+            setInterval(poll, 5000);
+        })();
+    </script>
+}
+

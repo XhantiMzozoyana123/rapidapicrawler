@@ -155,10 +155,43 @@ public class CrawlJobService
     /// Applies THIS job's headless flag to the shared scraper options. The Playwright
     /// client reads it on its next browser use and relaunches if the mode changed.
     /// </summary>
-    private void SetHeadless(string jobId, bool headless)
+        private void SetHeadless(string jobId, bool headless)
     {
         _scraperOptions.Headless = headless;
         _logger.LogInformation("Crawl job {JobId} using {Mode} browser.", jobId,
             headless ? "HEADLESS" : "HEADED (visible)");
+    }
+
+    /// <summary>
+    /// Hangfire entry point: generate (or regenerate) the keyword strategy for an existing
+    /// crawl run. Wired to the standalone /KeywordStrategy controller's Generate button.
+    /// </summary>
+    [AutomaticRetry(Attempts = 0)]
+    public async Task RunKeywordStrategyAsync(string jobId, int runId)
+    {
+        void Handler(object? _, ProgressEventArgs e) => _coordinator.Append(jobId, e.Message);
+
+        _orchestrator.Progress += Handler;
+        _analysisProgress.Start(runId);
+        try
+        {
+            _logger.LogInformation("Starting keyword strategy for run #{RunId} (job {JobId}).", runId, jobId);
+            var text = await _orchestrator.GenerateKeywordStrategyAsync(runId, CancellationToken.None);
+            _analysisProgress.MarkCompleted(runId);
+            _coordinator.Complete(jobId, runId, 0, 0);
+            _coordinator.Append(jobId, "=== KEYWORD STRATEGY READY — see the Keyword Strategy page ===");
+            _logger.LogInformation("Keyword strategy job {JobId} completed ({Length} chars).", jobId, text.Length);
+        }
+        catch (Exception ex)
+        {
+            _analysisProgress.MarkFailed(runId, ex.Message);
+            _coordinator.Fail(jobId, ex.Message);
+            _logger.LogError(ex, "Keyword strategy job {JobId} failed.", jobId);
+            throw;
+        }
+        finally
+        {
+            _orchestrator.Progress -= Handler;
+        }
     }
 }
