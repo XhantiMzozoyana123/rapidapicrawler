@@ -54,6 +54,15 @@ public interface ISearchRunRepository
     /// the LLM rich, correctly-associated data.
     /// </summary>
     Task<List<CrawledPage>> GetPagesForRunAsync(int runId);
+
+    /// <summary>
+    /// Deletes any previously extracted feedback rows for <paramref name="runId"/> and
+    /// inserts the supplied structured customer-voice rows (analysis regeneration safe).
+    /// </summary>
+    Task ReplaceCustomerFeedbackAsync(int runId, List<CustomerFeedback> items);
+
+    /// <summary>All structured customer-voice rows extracted for a run.</summary>
+    Task<List<CustomerFeedback>> GetCustomerFeedbackAsync(int runId);
     Task<List<SearchRun>> GetRunsAsync();
     Task<string?> GetLatestReportAsync(int runId);
     Task<int> CountPagesAsync(int runId);

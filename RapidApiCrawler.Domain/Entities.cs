@@ -43,5 +43,30 @@ public class AnalysisReport
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// One structured customer-voice signal extracted (by the LLM) from an API's captured
+/// discussions/reviews. Rows are the intelligence layer: complaint clusters, feature
+/// requests and demand signals are aggregated from these rows deterministically in C#.
+/// </summary>
+public class CustomerFeedback
+{
+    public int Id { get; set; }
+    public int SearchRunId { get; set; }
+    public int ListingId { get; set; }
+    /// <summary>positive | negative | neutral | question | request</summary>
+    public string Sentiment { get; set; } = string.Empty;
+    /// <summary>performance | pricing | documentation | reliability | integration | developer-experience | feature-gap | other</summary>
+    public string Topic { get; set; } = string.Empty;
+    /// <summary>Short pain-point phrase, empty if none.</summary>
+    public string PainPoint { get; set; } = string.Empty;
+    /// <summary>Short feature-request phrase, empty if none.</summary>
+    public string FeatureRequest { get; set; } = string.Empty;
+    /// <summary>0.0 - 1.0 how severe/impactful the signal is.</summary>
+    public double Severity { get; set; }
+    /// <summary>Short verbatim quote from the captured discussion backing this row.</summary>
+    public string Quote { get; set; } = string.Empty;
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+}
+
 /// <summary>A query result for a database table (column names plus rows of raw cell values).</summary>
 public record TableResult(string[] Columns, List<object?[]> Rows);

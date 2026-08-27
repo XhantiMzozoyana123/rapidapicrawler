@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using RapidApiCrawler.Domain;
 
@@ -42,7 +43,7 @@ public partial class CrawlOrchestrator(
     public event EventHandler<AnalysisProgressEventArgs>? AnalysisProgress;
 
     /// <summary>Number of report sections emitted by <see cref="BuildSectionPrompts"/>.</summary>
-    private const int SectionCount = 6;
+    private const int SectionCount = 7;
 
     private static readonly Regex TokenCountRegex =
         new(@"^Generating\.\.\.\s+(\d+) tokens", RegexOptions.Compiled);
@@ -252,6 +253,17 @@ public partial class CrawlOrchestrator(
             Report($"WARNING: could not load crawled pages ({ex.Message}) — analysing listing names only.");
         }
 
+        // ---- Phase 2: Customer Voice engine ----
+        // Convert unstructured discussions into structured CustomerFeedback rows (DB-backed),
+        // then aggregate counts/severity deterministically. These aggregates become verified
+        // facts for every later section — the LLM interprets them, it does not invent them.
+        var (feedbackRows, feedbackRequests) =
+            await ExtractCustomerFeedbackAsync(runId, listings, commentsTextByListing, ct);
+        Report($"Customer Voice: {feedbackRows.Count} structured signals extracted " +
+               $"({feedbackRequests} LLM call(s)).");
+
+        var verifiedVoiceFacts = BuildVerifiedVoiceFacts(feedbackRows);
+
         // ---- Build one rich, self-contained profile block per API ----
         // The block bundles identity + overview + that API's OWN customer comments, so the
         // model always sees each review together with the exact API it belongs to.
@@ -283,8 +295,9 @@ public partial class CrawlOrchestrator(
         var summaries = new List<string>();
 
         // --- Fine-grained progress plumbing ---
-        // totalRequests = one summary request per chunk + one per report section.
-        var totalRequests = chunks.Count + SectionCount;
+        // totalRequests = one summary request per chunk + one per report section
+        // + one per customer-voice extraction batch.
+        var totalRequests = chunks.Count + SectionCount + feedbackRequests;
         var completedRequests = 0;
         string currentStep = string.Empty;
         int currentMaxTokens = 0;
@@ -352,7 +365,7 @@ Summary of notable APIs, themes and customer feedback:";
         //  - Opportunity Scores computed from the model's raw component assessments
         //    with fixed weights, plus BUILD/INVESTIGATE/MONITOR/AVOID verdicts.
         var sections = BuildSectionPrompts(keyword);
-        var verifiedFacts = string.Empty;
+        var verifiedFacts = verifiedVoiceFacts;
 
         var report = new StringBuilder();
         report.AppendLine($"# Gap-Analysis Report: {keyword}");
@@ -403,8 +416,8 @@ Summary of notable APIs, themes and customer feedback:";
                     if (total > 0)
                     {
                         double pctDirectAdj = Math.Round(100.0 * (direct + adjacent) / total, 1);
-                        verifiedFacts =
-                            $"VERIFIED CLASSIFICATION COUNTS (computed programmatically from the classified table — cite these figures exactly): " +
+                        verifiedFacts = verifiedVoiceFacts +
+                            $"\nVERIFIED CLASSIFICATION COUNTS (computed programmatically from the classified table — cite these figures exactly): " +
                             $"{total} APIs listed: DIRECT={direct}, ADJACENT={adjacent}, IRRELEVANT={irrelevant}. " +
                             $"Relevant (direct+adjacent) = {pctDirectAdj}% of the listed set.";
                         Report($"Verified classification parsed: {direct}D/{adjacent}A/{irrelevant}I ({pctDirectAdj}% relevant).");
@@ -542,11 +555,150 @@ Summary of notable APIs, themes and customer feedback:";
     }
 
     /// <summary>
-    /// Builds the prompt + token budget for each report section.
-    /// Division of labour: the LLM classifies relevance, extracts customer pain, proposes
-    /// opportunities and assesses raw components — the C# application does all arithmetic
-    /// (classification percentages, Opportunity Scores, verdicts) deterministically.
+    /// Customer Voice extraction: sends captured discussion text per listing (batched) to
+    /// the LLM and parses the returned JSON array into structured <see cref="CustomerFeedback"/>
+    /// rows persisted in the database. Aggregation of those rows happens in C# only.
     /// </summary>
+    private async Task<(List<CustomerFeedback> Items, int Requests)> ExtractCustomerFeedbackAsync(
+        int runId,
+        List<ApiListing> listings,
+        IReadOnlyDictionary<int, string> commentsTextByListing,
+        CancellationToken ct)
+    {
+        var items = new List<CustomerFeedback>();
+        var withComments = listings.Where(l => commentsTextByListing.ContainsKey(l.Id)).ToList();
+        if (withComments.Count == 0) return (items, 0);
+
+        var slugToListing = listings
+            .GroupBy(l => l.ApiSlug, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var requestCount = 0;
+        foreach (var batch in withComments.Chunk(5))
+        {
+            ct.ThrowIfCancellationRequested();
+            var payload = string.Join("\n\n", batch.Select(l =>
+                $"API slug: {l.ApiSlug}\nName: {l.Name}\nCustomer discussion text: {commentsTextByListing[l.Id]}"));
+
+            var prompt = $@"You are a customer-voice analyst. Below are captured customer
+discussions for several RapidAPI APIs. Extract EVERY distinct signal into a JSON array.
+Classify each item:
+- sentiment: positive | negative | neutral | question | request
+- topic: performance | pricing | documentation | reliability | integration |
+  developer-experience | feature-gap | other
+- painPoint: short pain phrase (or empty string if not a complaint)
+- featureRequest: short request phrase (or empty string if not a request)
+- severity: 0.0-1.0 (impact on the customer)
+- quote: a short verbatim snippet from the text supporting this item
+
+Return ONLY the JSON array — no commentary, no markdown fences.
+Example item: {{""slug"":""youtube138"",""sentiment"":""negative"",""topic"":""performance"",""painPoint"":""slow bulk requests"",""featureRequest"":"""",""severity"":0.8,""quote"":""painfully slow when I make multiple requests""}}
+
+{payload}";
+
+            requestCount++;
+            string raw;
+            try
+            {
+                raw = await analyzer.CompleteAsync(prompt, 1200, NullProgress.Instance, ct);
+            }
+            catch (Exception ex)
+            {
+                Report($"WARNING: customer-voice extraction batch failed ({ex.Message}) — skipping.");
+                continue;
+            }
+
+            foreach (var item in ParseFeedbackJson(raw, slugToListing))
+                items.Add(item);
+        }
+
+        try
+        {
+            await repository.ReplaceCustomerFeedbackAsync(runId, items);
+        }
+        catch (Exception ex)
+        {
+            Report($"WARNING: could not persist customer feedback ({ex.Message}).");
+        }
+        return (items, requestCount);
+    }
+    private static List<CustomerFeedback> ParseFeedbackJson(
+        string raw, Dictionary<string, ApiListing> slugToListing)
+    {
+        var results = new List<CustomerFeedback>();
+        try
+        {
+            var start = raw.IndexOf('[');
+            var end = raw.LastIndexOf(']');
+            if (start < 0 || end <= start) return results;
+            using var doc = JsonDocument.Parse(raw[start..(end + 1)]);
+            foreach (var el in doc.RootElement.EnumerateArray())
+            {
+                string Get(string name) =>
+                    el.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
+                        ? p.GetString()?.Trim() ?? string.Empty : string.Empty;
+
+                var slug = Get("slug");
+                if (!slugToListing.TryGetValue(slug, out var listing)) continue;
+
+                var severity = el.TryGetProperty("severity", out var sev) &&
+                               sev.ValueKind == JsonValueKind.Number
+                    ? sev.GetDouble() : 0.5;
+
+                results.Add(new CustomerFeedback
+                {
+                    ListingId = listing.Id,
+                    Sentiment = Get("sentiment").ToLowerInvariant() is { Length: > 0 } s ? s : "neutral",
+                    Topic = Get("topic").ToLowerInvariant() is { Length: > 0 } t ? t : "other",
+                    PainPoint = Get("painPoint"),
+                    FeatureRequest = Get("featureRequest"),
+                    Severity = Math.Clamp(severity, 0, 1),
+                    Quote = Get("quote") is { Length: > 300 } q ? q[..300] : Get("quote"),
+                });
+            }
+        }
+        catch
+        {
+            // Malformed JSON from the model — skip this batch; aggregation still works
+            // with whatever batches parsed.
+        }
+        return results;
+    }
+
+    /// <summary>Deterministic aggregation of structured feedback into verified signal facts.</summary>
+    private static string BuildVerifiedVoiceFacts(List<CustomerFeedback> rows)
+    {
+        if (rows.Count == 0)
+            return "VERIFIED CUSTOMER SIGNALS: no structured customer feedback was extracted for this run.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"VERIFIED CUSTOMER SIGNALS (computed programmatically from {rows.Count} extracted feedback rows — interpret these exact numbers; do not invent others):");
+
+        foreach (var p in rows.Where(f => !string.IsNullOrWhiteSpace(f.PainPoint))
+                     .GroupBy(f => f.PainPoint.ToLowerInvariant())
+                     .Select(g => new { Name = g.First().PainPoint, Count = g.Count(), Sev = g.Average(f => f.Severity) })
+                     .OrderByDescending(p => p.Count).Take(10))
+            sb.AppendLine($"  - PAIN: {p.Name}: {p.Count} mention(s), severity {p.Sev:0.00}");
+
+        foreach (var r in rows.Where(f => !string.IsNullOrWhiteSpace(f.FeatureRequest))
+                     .GroupBy(f => f.FeatureRequest.ToLowerInvariant())
+                     .Select(g => new { Name = g.First().FeatureRequest, Count = g.Count(), Sev = g.Average(f => f.Severity) })
+                     .OrderByDescending(r => r.Count).Take(10))
+            sb.AppendLine($"  - REQUEST: {r.Name}: {r.Count} request(s), demand weight {r.Sev:0.00}");
+
+        sb.AppendLine("BY TOPIC: " + string.Join(", ",
+            rows.GroupBy(f => f.Topic).Select(g => $"{g.Key}={g.Count()}").OrderByDescending(s => s)));
+        sb.AppendLine($"Signals cover {rows.Select(f => f.ListingId).Distinct().Count()} distinct API(s).");
+        return sb.ToString();
+    }
+
+    /// <summary>Shared no-op progress sink for auxiliary LLM stages.</summary>
+    private sealed class NullProgress : IProgress<string>
+    {
+        public static readonly NullProgress Instance = new();
+        public void Report(string value) { }
+    }
+
     private static (string Title, string Prompt, int MaxTokens)[] BuildSectionPrompts(string keyword)
     {
         const string GroundingRules = @"
@@ -591,7 +743,20 @@ CLASSIFICATION_SUMMARY: direct=<N> adjacent=<M> irrelevant=<K>{GroundingRules}
 
 Competitor Landscape:", 700),
 
-            ("2. Market Overview",
+            ("2. Customer Voice Analysis (structured signals)",
+             $@"Below are VERIFIED CUSTOMER SIGNALS — pain points, feature requests and topic
+breakdowns computed programmatically from structured extraction of real captured reviews.
+Your job is INTERPRETATION ONLY: explain what these numbers mean for someone entering the
+""{keyword}"" space, which pains are most strategically valuable to solve, which requests
+signal willingness to pay, and where signals are too sparse to be trusted. Every number you
+cite MUST match the verified counts. Do not add new pain points or requests that are not in
+the verified list.{GroundingRules}
+
+{{verifiedFacts}}
+
+Customer Voice Analysis:", 500),
+
+            ("3. Market Overview",
              $@"You are a rigorous market research analyst writing the market overview for
 keyword ""{keyword}"" (3-5 sentences). If VERIFIED CLASSIFICATION COUNTS were supplied,
 cite those exact numbers as proportions of relevant vs non-relevant APIs — they were
@@ -603,7 +768,7 @@ computed programmatically and outrank your estimates. Never invent percentages.{
 
 Market Overview:", 300),
 
-            ("3. Gaps & Underserved Needs (evidence-ranked)",
+            ("4. Gaps & Underserved Needs (evidence-ranked)",
              $@"Identify EXACTLY 4 specific market gaps for keyword ""{keyword}"" on RapidAPI.
 Use ONLY APIs classified DIRECT or ADJACENT — their reviews may be cited; nothing from an
 IRRELEVANT API may support any gap. For EACH gap output:
@@ -620,7 +785,7 @@ Order gaps by strength of supporting evidence (strongest OBSERVED first).{Ground
 
 Gaps & Underserved Needs:", 600),
 
-            ("4. Recommended API Opportunities (evidence-scored)",
+            ("5. Recommended API Opportunities (evidence-scored)",
              $@"Propose API product opportunities for ""{keyword}"", ranked best-first. Produce
 TWO OR THREE ideas — never pad to three with a weakly-supported one; if only two have real
 evidence behind them, return two and say so. Format EACH idea exactly:
@@ -641,7 +806,7 @@ Base opportunities ONLY on DIRECT/ADJACENT APIs and their captured reviews. Comp
 
 Recommended API Opportunities:", 900),
 
-            ("5. Risks & Data Limitations",
+            ("6. Risks & Data Limitations",
              $@"Identify 3 key risks for building APIs in the ""{keyword}"" space (platform
 dependency, rate limits, saturation...) using only relevant-API evidence, THEN add a final
 subsection '## Analysis Limitations' honestly listing what this report does NOT know: which
@@ -654,7 +819,7 @@ inference.{GroundingRules}
 
 Risks & Data Limitations:", 450),
 
-            ("6. Estimated Market Size",
+            ("7. Estimated Market Size",
              $@"Estimate the total addressable market size for API products serving the
 ""{keyword}"" space. Follow this EXACT structure:
 - Data basis (OBSERVED): <what the crawl actually shows — count of DIRECT+ADJACENT APIs,

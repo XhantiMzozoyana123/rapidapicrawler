@@ -130,6 +130,28 @@ public class MySqlSearchRunRepository : ISearchRunRepository
                       select page).ToListAsync();
     }
 
+    public async Task ReplaceCustomerFeedbackAsync(int runId, List<CustomerFeedback> items)
+    {
+        await using var ctx = _factory.CreateDbContext();
+        var existing = ctx.CustomerFeedback.Where(f => f.SearchRunId == runId);
+        ctx.CustomerFeedback.RemoveRange(existing);
+        foreach (var item in items)
+        {
+            item.SearchRunId = runId;
+            ctx.CustomerFeedback.Add(item);
+        }
+        await ctx.SaveChangesAsync();
+    }
+
+    public async Task<List<CustomerFeedback>> GetCustomerFeedbackAsync(int runId)
+    {
+        await using var ctx = _factory.CreateDbContext();
+        return await ctx.CustomerFeedback
+            .Where(f => f.SearchRunId == runId)
+            .OrderBy(f => f.Id)
+            .ToListAsync();
+    }
+
     // ---- Raw table browser (MetaData table inspection) ----
 
     private string GetConnectionString()

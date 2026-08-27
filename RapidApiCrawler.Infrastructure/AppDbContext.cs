@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<ApiListing> ApiListings => Set<ApiListing>();
     public DbSet<CrawledPage> CrawledPages => Set<CrawledPage>();
     public DbSet<AnalysisReport> AnalysisReports => Set<AnalysisReport>();
+    public DbSet<CustomerFeedback> CustomerFeedback => Set<CustomerFeedback>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -59,6 +60,19 @@ public class AppDbContext : DbContext
             entity.Property(e => e.Id).ValueGeneratedOnAdd();
             entity.Property(e => e.Model).HasMaxLength(100).IsRequired();
             entity.Property(e => e.ReportText).HasColumnType("LONGTEXT").IsRequired();
+            entity.Property(e => e.CreatedUtc).HasColumnType("DATETIME(6)");
+        });
+
+        modelBuilder.Entity<CustomerFeedback>(entity =>
+        {
+            entity.ToTable("CustomerFeedback");
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.Property(e => e.Sentiment).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.Topic).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.PainPoint).HasMaxLength(500);
+            entity.Property(e => e.FeatureRequest).HasMaxLength(500);
+            entity.Property(e => e.Severity).HasColumnType("DOUBLE");
+            entity.Property(e => e.Quote).HasColumnType("TEXT");
             entity.Property(e => e.CreatedUtc).HasColumnType("DATETIME(6)");
         });
 
