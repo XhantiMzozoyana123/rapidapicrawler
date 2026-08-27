@@ -43,7 +43,7 @@ public partial class CrawlOrchestrator(
     public event EventHandler<AnalysisProgressEventArgs>? AnalysisProgress;
 
     /// <summary>Number of report sections emitted by <see cref="BuildSectionPrompts"/>.</summary>
-    private const int SectionCount = 7;
+    private const int SectionCount = 8;
 
     private static readonly Regex TokenCountRegex =
         new(@"^Generating\.\.\.\s+(\d+) tokens", RegexOptions.Compiled);
@@ -263,6 +263,7 @@ public partial class CrawlOrchestrator(
                $"({feedbackRequests} LLM call(s)).");
 
         var verifiedVoiceFacts = BuildVerifiedVoiceFacts(feedbackRows);
+        var verifiedKeywordFacts = BuildKeywordFacts(listings, overviewTextByListing, feedbackRows);
 
         // ---- Build one rich, self-contained profile block per API ----
         // The block bundles identity + overview + that API's OWN customer comments, so the
@@ -416,7 +417,7 @@ Summary of notable APIs, themes and customer feedback:";
                     if (total > 0)
                     {
                         double pctDirectAdj = Math.Round(100.0 * (direct + adjacent) / total, 1);
-                        verifiedFacts = verifiedVoiceFacts +
+                        verifiedFacts = verifiedVoiceFacts + "\n" + verifiedKeywordFacts +
                             $"\nVERIFIED CLASSIFICATION COUNTS (computed programmatically from the classified table — cite these figures exactly): " +
                             $"{total} APIs listed: DIRECT={direct}, ADJACENT={adjacent}, IRRELEVANT={irrelevant}. " +
                             $"Relevant (direct+adjacent) = {pctDirectAdj}% of the listed set.";
@@ -699,6 +700,92 @@ Example item: {{""slug"":""youtube138"",""sentiment"":""negative"",""topic"":""p
         public void Report(string value) { }
     }
 
+    /// <summary>Stopwords excluded from keyword-frequency analysis.</summary>
+    private static readonly HashSet<string> Stopwords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the","a","an","and","or","but","for","with","from","that","this","these","those","is",
+        "are","was","were","be","been","being","to","of","in","on","at","by","as","it","its",
+        "you","your","our","we","they","their","can","will","not","no","yes","if","then","than",
+        "more","most","other","some","any","all","use","using","used","get","also","into","up",
+        "out","about","over","under","between","within","without","through","during","before",
+        "after","above","below","which","who","whom","what","when","where","why","how","api",
+        "apis","data","service","services","simple","easy","powerful","best","new","one","two",
+        "per","via","such","like","just","only","very","much","many","support","supports",
+        "provide","provides","allow","allows","based","access","includes","including"
+    };
+
+    /// <summary>
+    /// Keyword Intelligence (Slice 1): deterministic extraction of keyword/phrase statistics
+    /// from competitor listing overviews, cross-referenced with customer-signal mentions.
+    /// Pure C# — no LLM involved. Coverage = in how many distinct API overviews the term
+    /// appears; demand = how many extracted pain/request signals reference it.
+    /// </summary>
+    private static string BuildKeywordFacts(
+        List<ApiListing> listings,
+        IReadOnlyDictionary<int, string> overviewTextByListing,
+        List<CustomerFeedback> feedbackRows)
+    {
+        var withOverviews = listings.Where(l => overviewTextByListing.ContainsKey(l.Id)).ToList();
+        if (withOverviews.Count == 0)
+            return "VERIFIED KEYWORD DATA: no listing overviews were captured.";
+
+        static IEnumerable<string> Terms(string text)
+        {
+            var words = Regex.Matches(text.ToLowerInvariant(), @"[a-z][a-z0-9+#-]{2,}")
+                .Select(m => m.Value)
+                .Where(w => !Stopwords.Contains(w))
+                .ToList();
+            for (var i = 0; i < words.Count; i++)
+            {
+                yield return words[i];
+                if (i + 1 < words.Count)
+                    yield return $"{words[i]} {words[i + 1]}"; // bigram — the SEO sweet spot
+            }
+        }
+
+        // term -> set of listing IDs whose overview contains it
+        var coverage = new Dictionary<string, HashSet<int>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var l in withOverviews)
+        {
+            foreach (var term in Terms(overviewTextByListing[l.Id]).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (!coverage.TryGetValue(term, out var set))
+                    coverage[term] = set = new HashSet<int>();
+                set.Add(l.Id);
+            }
+        }
+
+        // Demand signal: how many extracted customer feedback rows reference the term.
+        var feedbackCorpus = string.Join(" ", feedbackRows.Select(f =>
+            $"{f.PainPoint} {f.FeatureRequest} {f.Quote}")).ToLowerInvariant();
+
+        var stats = coverage
+            .Where(kv => kv.Key.Contains(' ') || kv.Key.Length >= 4) // skip tiny/noisy unigrams
+            .Select(kv => new
+            {
+                Term = kv.Key,
+                Count = kv.Value.Count,
+                Demand = feedbackCorpus.Split(kv.Key.ToLowerInvariant()).Length - 1
+            })
+            .Where(s => s.Count >= 2) // term must appear in at least 2 overviews to matter
+            .OrderByDescending(s => s.Count).ThenByDescending(s => s.Demand)
+            .Take(25)
+            .ToList();
+
+        if (stats.Count == 0)
+            return "VERIFIED KEYWORD DATA: no keyword appeared in 2+ listing overviews.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"VERIFIED KEYWORD DATA (computed programmatically from {withOverviews.Count} captured listing overviews — cite exactly; do not invent keywords):");
+        foreach (var s in stats)
+            sb.AppendLine($"  - \"{s.Term}\": appears in {s.Count}/{withOverviews.Count} overviews " +
+                          $"({Math.Round(100.0 * s.Count / withOverviews.Count, 1)}%), " +
+                          $"{s.Demand} customer-signal mention(s)");
+        sb.AppendLine("Interpretation guide: high coverage = crowded/expected term; " +
+                      "low coverage + high demand mentions = differentiation opportunity.");
+        return sb.ToString();
+    }
+
     private static (string Title, string Prompt, int MaxTokens)[] BuildSectionPrompts(string keyword)
     {
         const string GroundingRules = @"
@@ -768,7 +855,23 @@ computed programmatically and outrank your estimates. Never invent percentages.{
 
 Market Overview:", 300),
 
-            ("4. Gaps & Underserved Needs (evidence-ranked)",
+            ("4. Keyword Intelligence (computed statistics)",
+             $@"Below are VERIFIED KEYWORD DATA — deterministic term/phrase frequencies from
+competitor listing overviews, cross-referenced with customer-signal mentions. Your job:
+1. Group related terms into semantic clusters (e.g. 'web scraping' + 'website scraper' +
+   'data extraction' → cluster 'Website Data Extraction') and pick a PRIMARY keyword per
+   cluster based on the coverage/demand numbers.
+2. Identify OPPORTUNITY keywords: low overview coverage + high customer-signal mentions
+   (differentiation), or high coverage + high demand (table stakes — must include).
+3. Recommend 5-8 keywords/phrases for a NEW API listing targeting ""{keyword}"", each with
+   a one-line rationale citing its verified numbers.
+Do NOT invent keywords not present in the verified data.{GroundingRules}
+
+{{verifiedFacts}}
+
+Keyword Intelligence:", 550),
+
+            ("5. Gaps & Underserved Needs (evidence-ranked)",
              $@"Identify EXACTLY 4 specific market gaps for keyword ""{keyword}"" on RapidAPI.
 Use ONLY APIs classified DIRECT or ADJACENT — their reviews may be cited; nothing from an
 IRRELEVANT API may support any gap. For EACH gap output:
@@ -785,7 +888,7 @@ Order gaps by strength of supporting evidence (strongest OBSERVED first).{Ground
 
 Gaps & Underserved Needs:", 600),
 
-            ("5. Recommended API Opportunities (evidence-scored)",
+            ("6. Recommended API Opportunities (evidence-scored)",
              $@"Propose API product opportunities for ""{keyword}"", ranked best-first. Produce
 TWO OR THREE ideas — never pad to three with a weakly-supported one; if only two have real
 evidence behind them, return two and say so. Format EACH idea exactly:
@@ -806,7 +909,7 @@ Base opportunities ONLY on DIRECT/ADJACENT APIs and their captured reviews. Comp
 
 Recommended API Opportunities:", 900),
 
-            ("6. Risks & Data Limitations",
+            ("7. Risks & Data Limitations",
              $@"Identify 3 key risks for building APIs in the ""{keyword}"" space (platform
 dependency, rate limits, saturation...) using only relevant-API evidence, THEN add a final
 subsection '## Analysis Limitations' honestly listing what this report does NOT know: which
@@ -819,7 +922,7 @@ inference.{GroundingRules}
 
 Risks & Data Limitations:", 450),
 
-            ("7. Estimated Market Size",
+            ("8. Estimated Market Size",
              $@"Estimate the total addressable market size for API products serving the
 ""{keyword}"" space. Follow this EXACT structure:
 - Data basis (OBSERVED): <what the crawl actually shows — count of DIRECT+ADJACENT APIs,
