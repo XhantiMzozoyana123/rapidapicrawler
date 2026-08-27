@@ -345,10 +345,14 @@ Summary of notable APIs, themes and customer feedback:";
         var condensedContext = string.Join("\n\n---\n\n", summaries);
         Report($"Condensed {listings.Count} listings into {summaries.Count} summary chunk(s).");
 
-        // Step 3: Generate each report section as a separate, smaller request — with
-        // validation and one repair pass per section so truncated or malformed output
-        // never reaches the saved report.
-        var sections = BuildSectionPrompts(keyword, condensedContext);
+        // Step 3: Generate each report section as a separate, smaller request.
+        // Deterministic logic lives HERE, not in the model:
+        //  - classification counts/percentages parsed from the landscape table summary
+        //    and re-injected as authoritative facts into every later prompt;
+        //  - Opportunity Scores computed from the model's raw component assessments
+        //    with fixed weights, plus BUILD/INVESTIGATE/MONITOR/AVOID verdicts.
+        var sections = BuildSectionPrompts(keyword);
+        var verifiedFacts = string.Empty;
 
         var report = new StringBuilder();
         report.AppendLine($"# Gap-Analysis Report: {keyword}");
@@ -357,15 +361,19 @@ Summary of notable APIs, themes and customer feedback:";
                           $"generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC_");
         report.AppendLine();
 
-        foreach (var (title, prompt, maxTokens) in sections)
+        foreach (var (title, promptTemplate, maxTokens) in sections)
         {
             ct.ThrowIfCancellationRequested();
+            var prompt = promptTemplate
+                .Replace("{verifiedFacts}", verifiedFacts)
+                .Replace("{condensedContext}", condensedContext);
+
             BeginStep(maxTokens, $"Writing {title}");
             Report($"Generating {title}...");
 
             var sectionText = await analyzer.CompleteAsync(prompt, maxTokens, progress, ct);
 
-            // Validate; if the response looks incomplete/malformed, regenerate once with
+            // Validate; if the response looks incomplete/malformed, regenerate with
             // corrective feedback instead of saving a broken section.
             for (var attempt = 2; !ValidateSection(title, sectionText) && attempt <= 3; attempt++)
             {
@@ -373,13 +381,50 @@ Summary of notable APIs, themes and customer feedback:";
                 sectionText = await analyzer.CompleteAsync(
                     prompt + "\n\nIMPORTANT: Your previous response was rejected because it was incomplete, " +
                     "truncated mid-sentence, or violated the format instructions above. Produce the FULL " +
-                    "section this time, follow the exact requested structure/counts, and finish every sentence.",
+                    "section this time, follow the exact requested structure/counts and heading format, " +
+                    "and finish every sentence.",
                     maxTokens, progress, ct);
+            }
+
+            var clean = sectionText.Trim();
+
+            // ---- Deterministic post-processing (C#, not the LLM) ----
+            if (title.Contains("Competitor Landscape", StringComparison.OrdinalIgnoreCase))
+            {
+                var m = Regex.Match(clean,
+                    @"CLASSIFICATION_SUMMARY:\s*direct=(\d+)\s+adjacent=(\d+)\s+irrelevant=(\d+)",
+                    RegexOptions.IgnoreCase);
+                if (m.Success)
+                {
+                    int direct = int.Parse(m.Groups[1].Value),
+                        adjacent = int.Parse(m.Groups[2].Value),
+                        irrelevant = int.Parse(m.Groups[3].Value);
+                    int total = direct + adjacent + irrelevant;
+                    if (total > 0)
+                    {
+                        double pctDirectAdj = Math.Round(100.0 * (direct + adjacent) / total, 1);
+                        verifiedFacts =
+                            $"VERIFIED CLASSIFICATION COUNTS (computed programmatically from the classified table — cite these figures exactly): " +
+                            $"{total} APIs listed: DIRECT={direct}, ADJACENT={adjacent}, IRRELEVANT={irrelevant}. " +
+                            $"Relevant (direct+adjacent) = {pctDirectAdj}% of the listed set.";
+                        Report($"Verified classification parsed: {direct}D/{adjacent}A/{irrelevant}I ({pctDirectAdj}% relevant).");
+                    }
+
+                    // Keep the machine-readable line out of the human report but leave a friendly footer.
+                    clean = Regex.Replace(clean,
+                        @"\n?CLASSIFICATION_SUMMARY:[^\n]*",
+                        $"\n_Classification totals: {direct} direct · {adjacent} adjacent · {irrelevant} irrelevant_");
+                }
+            }
+
+            if (title.Contains("Recommended API Opportunities", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = RecomputeOpportunityScores(clean);
             }
 
             report.AppendLine($"## {title}");
             report.AppendLine();
-            report.AppendLine(sectionText.Trim());
+            report.AppendLine(clean);
             report.AppendLine();
             EndStep();
         }
@@ -389,32 +434,108 @@ Summary of notable APIs, themes and customer feedback:";
     }
 
     /// <summary>
+    /// Deterministic scoring engine. The LLM supplies raw component assessments
+    /// (Demand, Customer Pain, Competition, Market Saturation, Build Difficulty,
+    /// Evidence Strength — all 'higher = more of that thing'); this method computes the
+    /// final Opportunity Score with FIXED weights (beneficial metrics count positively,
+    /// Competition/Saturation/Difficulty are inverted) and assigns a verdict:
+    /// BUILD / INVESTIGATE / MONITOR / AVOID. Removes any AI-computed score so numbers
+    /// in the saved report always come from this code, never from the model.
+    /// Weights: Demand .30 · Pain .25 · Evidence .20 · Competition .10 · Saturation .075 · Difficulty .075.
+    /// </summary>
+    private static string RecomputeOpportunityScores(string text)
+    {
+        static double? Extract(string source, string metric) =>
+            Regex.Match(source, Regex.Escape(metric) + @"\s*(?:\([^)]*\))?\s*[:=]?\s*(\d(?:\.\d+)?)\s*/\s*10",
+                    RegexOptions.IgnoreCase) is { Success: true } m
+                ? double.Parse(m.Groups[1].Value)
+                : null;
+
+        // Split into per-idea blocks at medal headings; rebuild with computed scores.
+        var parts = Regex.Split(text, @"(?=^###?\s*[🥇🥈🥉])", RegexOptions.Multiline);
+        if (parts.Length <= 1) return text;
+
+        var sb = new StringBuilder();
+        sb.Append(parts[0]);
+        for (var i = 1; i < parts.Length; i++)
+        {
+            var block = parts[i];
+
+            // Strip any opportunity-score line the model wrote itself.
+            block = Regex.Replace(block,
+                @"\n\s*(?:[-*]\s*)?\*{0,2}Opportunity Score[^\n]*", string.Empty);
+
+            double? demand = Extract(block, "Demand"),
+                    pain = Extract(block, "Customer Pain"),
+                    competition = Extract(block, "Competition"),
+                    saturation = Extract(block, "Market Saturation"),
+                    difficulty = Extract(block, "Build Difficulty"),
+                    evidence = Extract(block, "Evidence Strength");
+
+            if (demand.HasValue && pain.HasValue && competition.HasValue &&
+                saturation.HasValue && difficulty.HasValue && evidence.HasValue)
+            {
+                var score = Math.Round(
+                    0.300 * demand.Value +
+                    0.250 * pain.Value +
+                    0.200 * evidence.Value +
+                    0.100 * (10 - competition.Value) +
+                    0.075 * (10 - saturation.Value) +
+                    0.075 * (10 - difficulty.Value), 1);
+
+                var verdict = score switch
+                {
+                    >= 8.0 => "**BUILD**",
+                    >= 6.5 => "**INVESTIGATE**",
+                    >= 4.5 => "**MONITOR**",
+                    _ => "**AVOID**"
+                };
+
+                block = block.TrimEnd() +
+                        $"\n- **Computed Opportunity Score: {score}/10 — Verdict: {verdict}**" +
+                        "\n_(calculated by the application from component scores: Demand 30%, Pain 25%, Evidence 20%, inverted Competition/Saturation/Difficulty 25% combined)_";
+            }
+
+            sb.Append(block);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Heuristic quality gate applied to each generated report section before it is saved.
     /// Rejects empty responses, ultra-short responses (likely refusals), text that ends
-    /// mid-sentence (token-budget truncation), and count violations for structured
-    /// sections (gaps must list 3–5 items, recommendations exactly 3).
+    /// mid-sentence (token-budget truncation), template placeholders left unfilled, count
+    /// violations (gaps must list exactly 4 items), literal "Idea N" formatting bugs, and
+    /// opportunities sections without at least two ranked ideas.
     /// </summary>
     private static bool ValidateSection(string title, string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         var trimmed = text.Trim();
         if (trimmed.Length < 150) return false;
+        if (trimmed.Contains("{condensedContext}") || trimmed.Contains("{verifiedFacts}"))
+            return false; // template placeholder leaked into output
 
         // Truncation heuristic: the final line should terminate cleanly.
         var lastLine = trimmed.Split('\n').LastOrDefault()?.Trim() ?? string.Empty;
-        if (lastLine.Length > 25 && !Regex.IsMatch(lastLine, @"[.!?:;\)\]""*`\d]$"))
+        if (lastLine.Length > 25 && !Regex.IsMatch(lastLine, @"[.!?:;\)\]""*`\d_]$"))
+            return false;
+
+        // Formatting bug: literal 'Idea N' placeholder instead of sequential numbering.
+        if (title.Contains("Recommended", StringComparison.OrdinalIgnoreCase) &&
+            Regex.IsMatch(trimmed, @"\bIdea N\b"))
             return false;
 
         if (title.Contains("Gaps", StringComparison.OrdinalIgnoreCase))
         {
-            var items = Regex.Matches(trimmed, @"(?m)^\s*(?:\d+[\.\)]|[-*•])\s+\S").Count;
-            if (items < 3 || items > 5) return false;
+            var items = Regex.Matches(trimmed, @"(?m)^[-*•]?\s*\*{0,2}\s*Gap\s+\d+:", RegexOptions.IgnoreCase).Count;
+            if (items != 4) return false;
         }
 
         if (title.Contains("Recommended", StringComparison.OrdinalIgnoreCase))
         {
-            var ideas = Regex.Matches(trimmed, @"(?m)^\s*(?:\d+[\.\)]|[🥇🥈🥉]|Idea\s*\d)", RegexOptions.IgnoreCase).Count;
-            if (ideas < 3) return false;
+            var ideas = Regex.Matches(trimmed, @"^[#*\s]*[🥇🥈🥉]\s*Idea\s*\d+", RegexOptions.Multiline).Count;
+            if (ideas < 2 || ideas > 3) return false;
         }
 
         return true;
@@ -422,93 +543,114 @@ Summary of notable APIs, themes and customer feedback:";
 
     /// <summary>
     /// Builds the prompt + token budget for each report section.
-    /// Design principles: every claim is separated into OBSERVED evidence (from actual
-    /// customer reviews) vs AI INTERPRETATION; competitors are classified by relevance
-    /// instead of assuming everything in the search results competes; and every
-    /// opportunity receives quantitative scores so ideas can be ranked.
+    /// Division of labour: the LLM classifies relevance, extracts customer pain, proposes
+    /// opportunities and assesses raw components — the C# application does all arithmetic
+    /// (classification percentages, Opportunity Scores, verdicts) deterministically.
     /// </summary>
-    private static (string Title, string Prompt, int MaxTokens)[] BuildSectionPrompts(string keyword, string condensedContext)
+    private static (string Title, string Prompt, int MaxTokens)[] BuildSectionPrompts(string keyword)
     {
         const string GroundingRules = @"
 CRITICAL RULES:
-1. EVIDENCE FIRST. For every claim state whether it is:
-   - [OBSERVED] — comes directly from actual customer reviews/discussion quoted in the context.
-   - [INFERRED] — your own interpretation where no direct customer evidence exists.
-2. NEVER invent customer complaints or requests. If the context contains no customer
-   feedback on a topic, say 'No direct customer evidence found' instead of assuming demand.
-3. QUANTIFY evidence whenever possible, e.g. '14 reviews mention quota problems'. If exact
-   counts are unavailable, use approximate counts ('several', 'one review') — never inflate.
-4. CLASSIFY competitors by relevance to the target problem space:
-   Direct = same data/function for same customers · Adjacent = similar customers, different
-   problem · Irrelevant = appeared only due to keyword overlap. Label each one.
-You may only claim what the context supports.";
+1. EVIDENCE FIRST. Tag every claim [OBSERVED] (from actual captured reviews) or
+   [INFERRED] (your interpretation where no direct review exists).
+2. NEVER invent complaints, requests, percentages, or counts. If the context lacks customer
+   feedback on a topic, write 'No direct customer evidence found'. Any number you state
+   MUST appear in the context itself. Verified figures supplied separately are authoritative.
+3. USE ONLY RELEVANT EVIDENCE. If an API was classified IRRELEVANT you may not cite its
+   reviews, features or problems anywhere in your analysis.
+4. You may reference ONLY the context below. No outside knowledge about these markets.";
+
+        const string ScoreScale = @"
+SCORING SCALE — all component scores 0-10, direction ALWAYS 'higher value means more of
+the thing named' (Competition 9/10 = very crowded market; Saturation 2/10 = wide open):
+- Demand: how many customers want this capability.
+- Customer Pain: how severe the observed complaints are.
+- Competition: level of competition (higher = MORE competitors).
+- Market Saturation: degree of saturation (higher = MORE saturated).
+- Build Difficulty rubric: 1-3 simple REST wrapper over existing services · 4-6 moderate
+  processing/caching/scaling · 7-8 complex infrastructure (browsers, video/media
+  pipelines, queues) · 9-10 heavy platform dependency or regulatory exposure.";
+        // NOTE: Do NOT compute an overall Opportunity Score yourself — the application
+        // calculates it deterministically from your components after parsing.";
 
         return new[]
         {
-            ("1. Market Overview",
-             $@"You are a rigorous market research analyst. Based on the summarised APIs found
-on RapidAPI for keyword ""{keyword}"", write a concise market overview (3-5 sentences):
-what the space covers, who the key players are, and how many of the found APIs are actually
-relevant to the core problem vs merely related.{GroundingRules}
-
-{condensedContext}
-
-Market Overview:", 300),
-
-            ("2. Competitor Landscape (classified table)",
-             $@"Based on the summarised APIs on RapidAPI for keyword ""{keyword}"", create a
-markdown table with EXACTLY these columns:
+            // Generated FIRST so the relevance classification becomes verified input for
+            // every following section (the C# layer parses the summary line and re-injects it).
+            ("1. Competitor Landscape (classified table)",
+             $@"Based on the summarised APIs crawled from RapidAPI for keyword ""{keyword}"",
+create a markdown table with EXACTLY these columns:
 | # | API | Provider | Relevance | Focus | Customer Sentiment |
-Relevance must be one of: DIRECT / ADJACENT / IRRELEVANT (with a 5-word justification in
-the Focus column). Include up to 12 significant APIs. Do NOT count IRRELEVANT ones as
-competitors in later sections. In Customer Sentiment summarise that API's reviews if any
-were captured ('no reviews captured' otherwise).{GroundingRules}
+Relevance must be one of: DIRECT / ADJACENT / IRRELEVANT (Focus column: max 10 words why).
+Include up to 12 significant APIs. In Customer Sentiment, summarise that API's reviews if
+any were captured ('no reviews captured' otherwise).
+After the table, on its own final line, print the exact machine-count of what you listed:
+CLASSIFICATION_SUMMARY: direct=<N> adjacent=<M> irrelevant=<K>{GroundingRules}
 
-{condensedContext}
+{{condensedContext}}
 
 Competitor Landscape:", 700),
 
+            ("2. Market Overview",
+             $@"You are a rigorous market research analyst writing the market overview for
+keyword ""{keyword}"" (3-5 sentences). If VERIFIED CLASSIFICATION COUNTS were supplied,
+cite those exact numbers as proportions of relevant vs non-relevant APIs — they were
+computed programmatically and outrank your estimates. Never invent percentages.{GroundingRules}
+
+{{verifiedFacts}}
+
+{{condensedContext}}
+
+Market Overview:", 300),
+
             ("3. Gaps & Underserved Needs (evidence-ranked)",
              $@"Identify EXACTLY 4 specific market gaps for keyword ""{keyword}"" on RapidAPI.
-For EACH gap output this structure:
+Use ONLY APIs classified DIRECT or ADJACENT — their reviews may be cited; nothing from an
+IRRELEVANT API may support any gap. For EACH gap output:
 - **Gap N: <name>**
-  - Evidence: <quote/paraphrase actual customer complaints with counts, e.g. '8 reviews
-    across 3 APIs mention quota problems'> or 'No direct customer evidence found'
+  - Evidence: <paraphrase actual customer complaints WITH the counts stated in the context,
+    e.g. '3 reviews across 2 APIs mention quota failures'> or 'No direct customer evidence found'
   - Interpretation: <your analysis of why this gap exists>
   - Opportunity hypothesis: <what could be built, framed as a hypothesis>
-Order gaps by strength of supporting evidence. Exactly 4 gaps, no more, no less.{GroundingRules}
+Order gaps by strength of supporting evidence (strongest OBSERVED first).{GroundingRules}
 
-{condensedContext}
+{{verifiedFacts}}
+
+{{condensedContext}}
 
 Gaps & Underserved Needs:", 600),
 
-            ("4. Recommended APIs to Build (scored & ranked)",
-             $@"Recommend exactly 3 API product ideas for ""{keyword}"", ranked best-first with
-🥇 🥈 🥉 medals. For EACH idea output:
-- **<Medal> Idea N: <name>**
-  - Evidence base: <which observed complaints/patterns support this, WITH counts; write
-    'Weak evidence' explicitly if only inference supports it>
-  - Target users: ...
-  - Key endpoints: ...
-  - Differentiation: ...
-  - Scores: Demand X/10 · Customer Pain X/10 · Competition (lower=better) X/10 ·
-    Market Saturation (lower=better) X/10 · Build Difficulty X/10 · Evidence Strength X/10
-  - **Opportunity Score: X.X/10** = weighted blend you justify in one sentence.
-Scores must be internally consistent with the evidence (a weakly-evidenced idea cannot
-score 9+ on Demand).{GroundingRules}
+            ("4. Recommended API Opportunities (evidence-scored)",
+             $@"Propose API product opportunities for ""{keyword}"", ranked best-first. Produce
+TWO OR THREE ideas — never pad to three with a weakly-supported one; if only two have real
+evidence behind them, return two and say so. Format EACH idea exactly:
+### 🥇 Idea 1: <name>   (then 🥈 Idea 2:, 🥉 Idea 3: — always sequential numbers, never 'Idea N')
+- Evidence base: <observed complaints/patterns WITH counts; write 'Weak evidence' plainly
+  if supported only by inference>
+- Target users / Key endpoints / Differentiation
+- Component scores: Demand: X/10 · Customer Pain: X/10 · Competition: X/10 ·
+  Market Saturation: X/10 · Build Difficulty: X/10 · Evidence Strength: X/10
 
-{condensedContext}
+Base opportunities ONLY on DIRECT/ADJACENT APIs and their captured reviews. Components only
+—the application computes the final Opportunity Score and verdict deterministically.
+{GroundingRules}{ScoreScale}
 
-Recommended APIs:", 900),
+{{verifiedFacts}}
+
+{{condensedContext}}
+
+Recommended API Opportunities:", 900),
 
             ("5. Risks & Data Limitations",
              $@"Identify 3 key risks for building APIs in the ""{keyword}"" space (platform
-dependency, rate limits, saturation...), THEN add a final subsection '## Analysis
-Limitations' honestly listing what this report does NOT know: which APIs lacked captured
-reviews, sample sizes available, and where conclusions rest on inference rather than
-evidence.{GroundingRules}
+dependency, rate limits, saturation...) using only relevant-API evidence, THEN add a final
+subsection '## Analysis Limitations' honestly listing what this report does NOT know: which
+APIs lacked captured reviews, sample sizes available, and which conclusions rest purely on
+inference.{GroundingRules}
 
-{condensedContext}
+{{verifiedFacts}}
+
+{{condensedContext}}
 
 Risks & Data Limitations:", 450),
         };
