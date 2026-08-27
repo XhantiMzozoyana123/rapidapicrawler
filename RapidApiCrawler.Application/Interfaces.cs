@@ -47,12 +47,13 @@ public interface ISearchRunRepository
     Task<List<ApiListing>> GetListingsAsync(int runId);
 
     /// <summary>
-    /// Returns all captured discussion/comment pages ('Discussions' PageType) for every
-    /// listing belonging to <paramref name="runId"/>, ordered by listing then capture order.
-    /// Used by the gap-analysis pipeline so customer feedback on each API's RapidAPI page
-    /// can inform the report.
+    /// Returns ALL captured pages ('ApiOverview' and 'Discussions') for every listing
+    /// belonging to <paramref name="runId"/>, ordered by listing then capture order.
+    /// Each page carries its <see cref="CrawledPage.ListingId"/> so callers can pair each
+    /// API's overview with its own customer discussion pages — the foundation for feeding
+    /// the LLM rich, correctly-associated data.
     /// </summary>
-    Task<List<CrawledPage>> GetDiscussionPagesAsync(int runId);
+    Task<List<CrawledPage>> GetPagesForRunAsync(int runId);
     Task<List<SearchRun>> GetRunsAsync();
     Task<string?> GetLatestReportAsync(int runId);
     Task<int> CountPagesAsync(int runId);

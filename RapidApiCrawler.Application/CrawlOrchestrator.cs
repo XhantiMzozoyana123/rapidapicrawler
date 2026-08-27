@@ -29,7 +29,7 @@ public partial class CrawlOrchestrator(
     // summarisation. Each batch is sent as a small prompt -> fast on a 7B model.
     private const int ListingsPerChunk = 25;
     // Max output tokens per chunk-summary request.
-    private const int ChunkSummaryTokens = 150;
+    private const int ChunkSummaryTokens = 350;
 
     public event EventHandler<ProgressEventArgs>? Progress;
 
@@ -216,46 +216,75 @@ public partial class CrawlOrchestrator(
     {
         Report($"Building gap-analysis report for '{keyword}' ({listings.Count} listings)...");
 
-        // Pull every customer discussion/comment page captured during the crawl and group
-        // the extracted plain text by listing, so the model can factor in what users of
-        // each API actually said (complaints, praise, feature requests).
-        var commentTextByListing = new Dictionary<int, string>();
+        // ---- Load ALL captured pages and pair them with their API listing ----
+        // Every CrawledPage carries ListingId (set at capture time), so each API's
+        // overview page and its discussion pages are joined by that key — never scrambled.
+        var overviewTextByListing = new Dictionary<int, string>();
+        var commentsTextByListing = new Dictionary<int, string>();
         try
         {
-            var pages = await repository.GetDiscussionPagesAsync(runId);
+            var pages = await repository.GetPagesForRunAsync(runId);
             foreach (var group in pages.GroupBy(p => p.ListingId))
             {
-                var combined = string.Join(" ",
-                    group.Select(p => ExtractCommentText(p.Html))
-                         .Where(t => t.Length > 0));
-                if (combined.Length > 0)
-                    commentTextByListing[group.Key] =
-                        combined.Length > 1500 ? combined[..1500] + "…" : combined;
+                var overview = string.Join(" ", group
+                    .Where(p => p.PageType == "ApiOverview")
+                    .OrderBy(p => p.Id)
+                    .Select(p => ExtractCommentText(p.Html))
+                    .Where(t => t.Length > 0));
+                if (overview.Length > 0)
+                    overviewTextByListing[group.Key] =
+                        overview.Length > 800 ? overview[..800] + "…" : overview;
+
+                var comments = string.Join(" | ", group
+                    .Where(p => p.PageType == "Discussions")
+                    .OrderBy(p => p.Id)   // preserve the original comment order
+                    .Select(p => ExtractCommentText(p.Html))
+                    .Where(t => t.Length > 0));
+                if (comments.Length > 0)
+                    commentsTextByListing[group.Key] =
+                        comments.Length > 2000 ? comments[..2000] + "…" : comments;
             }
-            Report($"Loaded customer comments for {commentTextByListing.Count} of {listings.Count} listings.");
+            Report($"Rich data loaded: overviews for {overviewTextByListing.Count}, " +
+                   $"customer discussions for {commentsTextByListing.Count} of {listings.Count} listings.");
         }
         catch (Exception ex)
         {
-            Report($"WARNING: could not load discussions ({ex.Message}) — analysing listings only.");
+            Report($"WARNING: could not load crawled pages ({ex.Message}) — analysing listing names only.");
         }
 
-        // Step 1: Chunk the listings and summarise each batch separately. Listings with
-        // customer comments get those appended so complaints/requests are summarised too.
-        var listingLines = listings
-            .Select(l =>
+        // ---- Build one rich, self-contained profile block per API ----
+        // The block bundles identity + overview + that API's OWN customer comments, so the
+        // model always sees each review together with the exact API it belongs to.
+        var listingBlocks = listings.Select(l =>
+        {
+            var sb = new StringBuilder();
+            sb.Append($"### API: {l.Name} (provider: {l.Provider}, slug: {l.ApiSlug})");
+            if (overviewTextByListing.TryGetValue(l.Id, out var ov))
+                sb.Append($"\nOverview: {ov}");
+            if (commentsTextByListing.TryGetValue(l.Id, out var cm))
+                sb.Append($"\nCustomer reviews & discussion: {cm}");
+            return sb.ToString();
+        }).ToList();
+
+        // ---- Adaptive chunking by character budget ----
+        // Rich text varies wildly per listing; fixed batch sizes could overflow the model's
+        // context. Pack blocks into chunks up to MaxChunkChars each (one block never split).
+        const int MaxChunkChars = 12_000;
+        var chunks = new List<List<string>>();
+        foreach (var block in listingBlocks)
+        {
+            if (chunks.Count == 0 ||
+                chunks[^1].Sum(b => b.Length) + block.Length > MaxChunkChars)
             {
-                var line = $"- {l.Name} (provider: {l.Provider}, slug: {l.ApiSlug})";
-                if (commentTextByListing.TryGetValue(l.Id, out var comments))
-                    line += $"\n  Customer comments: \"{comments}\"";
-                return line;
-            })
-            .ToArray();
-        var chunks = listingLines.Chunk(ListingsPerChunk).ToArray();
+                chunks.Add(new List<string>());
+            }
+            chunks[^1].Add(block);
+        }
         var summaries = new List<string>();
 
         // --- Fine-grained progress plumbing ---
         // totalRequests = one summary request per chunk + one per report section.
-        var totalRequests = chunks.Length + SectionCount;
+        var totalRequests = chunks.Count + SectionCount;
         var completedRequests = 0;
         string currentStep = string.Empty;
         int currentMaxTokens = 0;
@@ -288,18 +317,19 @@ public partial class CrawlOrchestrator(
             }
         });
 
-        for (int i = 0; i < chunks.Length; i++)
+        for (int i = 0; i < chunks.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
 
-            var batchText = string.Join("\n", chunks[i]);
-            BeginStep(ChunkSummaryTokens, $"Summarising API batch {i + 1} of {chunks.Length}");
-            Report($"Summarising chunk {i + 1}/{chunks.Length} ({chunks[i].Length} APIs)...");
+            var batchText = string.Join("\n\n", chunks[i]);
+            BeginStep(ChunkSummaryTokens, $"Summarising API batch {i + 1} of {chunks.Count}");
+            Report($"Summarising chunk {i + 1}/{chunks.Count} ({chunks[i].Count} APIs)...");
 
             var chunkPrompt = $@"You are a market research analyst reviewing RapidAPI listings.
-Extract the key API names, providers, notable themes, AND any customer sentiment from the
-following list. Some listings include real customer comments — capture recurring complaints,
-praise, and unmet needs. Keep it concise — a few bullet points.
+Each listing below has three parts: its identity, an Overview (what the API does), and
+real Customer reviews & discussion from its RapidAPI page. The reviews are the most
+valuable signal — capture recurring complaints, praise, what users cannot get today, and
+anything indicating willingness to pay. Keep it concise — a few bullet points per API.
 
 Listings for ""{keyword}"":
 {batchText}
