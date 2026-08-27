@@ -100,7 +100,6 @@ else
             const percentLabel = document.getElementById('analysis-progress-percent');
             const stepLabel = document.getElementById('analysis-progress-step');
             const statusBadge = document.getElementById('analysis-progress-status');
-            let reloaded = false;
 
             function setBar(pct, color, animated) {
                 bar.style.width = pct + '%';
@@ -129,12 +128,7 @@ else
                         statusBadge.className = 'badge bg-success ms-2';
                         setBar(100, 'bg-success', false);
                         percentLabel.textContent = '100%';
-                        stepLabel.textContent = '✅ Report ready — the output is below. Generate again to rebuild it.';
-                        // Refresh once so the saved report renders.
-                        if (!reloaded && !document.querySelector('.alert-danger')) {
-                            reloaded = true;
-                            location.reload();
-                        }
+                        stepLabel.textContent = '✅ Report ready — press F5 / refresh once to view it below.';
                     } else if (data.status === 'failed') {
                         statusBadge.className = 'badge bg-danger ms-2';
                         setBar(100, 'bg-danger', false);
