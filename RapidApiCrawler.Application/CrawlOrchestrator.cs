@@ -42,7 +42,7 @@ public partial class CrawlOrchestrator(
     public event EventHandler<AnalysisProgressEventArgs>? AnalysisProgress;
 
     /// <summary>Number of report sections emitted by <see cref="BuildSectionPrompts"/>.</summary>
-    private const int SectionCount = 5;
+    private const int SectionCount = 6;
 
     private static readonly Regex TokenCountRegex =
         new(@"^Generating\.\.\.\s+(\d+) tokens", RegexOptions.Compiled);
@@ -653,6 +653,30 @@ inference.{GroundingRules}
 {{condensedContext}}
 
 Risks & Data Limitations:", 450),
+
+            ("6. Estimated Market Size",
+             $@"Estimate the total addressable market size for API products serving the
+""{keyword}"" space. Follow this EXACT structure:
+- Data basis (OBSERVED): <what the crawl actually shows — count of DIRECT+ADJACENT APIs,
+  how many listings had customer discussions, total distinct complaint themes, ANY pricing
+  figures literally mentioned in captured reviews. Use only numbers present in the context.>
+- Bottom-up estimate [INFERRED]: <a plausible monthly-revenue range for a well-executed
+  competitor, derived ONLY from your data basis above — e.g. review volume × assumed
+  conversion willingness — showing your arithmetic explicitly>
+- Market-level estimate [INFERRED]: <rough annual TAM band for this niche expressed as
+  'LOW confidence' unless multiple independent signals agree; justify with one sentence
+  per signal>
+- Confidence level: HIGH / MEDIUM / LOW with one-sentence justification.
+NEVER present a dollar figure as fact — every monetary figure here is an estimate labelled
+[INFERRED], and you must NOT pull remembered statistics about these companies from outside
+knowledge. If the crawled data contains no usable monetisation signals, say so plainly and
+give only the widest possible inference band.{GroundingRules}
+
+{{verifiedFacts}}
+
+{{condensedContext}}
+
+Estimated Market Size:", 500),
         };
     }
 }
