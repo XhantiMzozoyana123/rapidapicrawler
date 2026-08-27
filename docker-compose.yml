@@ -33,20 +33,14 @@ services:
       - "8080:8080"
     environment:
       MYSQL_CONNECTION_STRING: "server=mysql;database=RapidApiCrawler;uid=rapidapi;pwd=your_password;SslMode=none;"
-      LLAMA_MODEL_PATH: "/models/model.gguf"
+      # Ollama runs on the VPS host — reach it from inside the container via host gateway.
+      OLLAMA_URL: "http://host.docker.internal:11434"
+      OLLAMA_MODEL: "huihui_ai/Qwen3.8-abliterated:latest"
       ASPNETCORE_ENVIRONMENT: Production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./models:/models:ro            # put your .gguf file here on the host
       - web_data:/app/data             # persisted DataProtection keys (stable antiforgery across restarts)
-    # Give the container access to the NVIDIA GPU (requires NVIDIA Container Toolkit
-    # on the host + a working driver). Modern Compose syntax.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1                 # the RTX A4000
-              capabilities: [gpu]
 
 volumes:
   mysql_data:

@@ -19,13 +19,9 @@ builder.Services.AddDataProtection()
 
 // ---- RapidApiCrawler services (shared clean-architecture layers) ----
 builder.Services.AddSingleton<ScraperOptions>();
-// AI analysis runs against an existing Ollama server (VPS): OLLAMA_URL + OLLAMA_MODEL env vars.
-var ollamaBase = Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://127.0.0.1:11434";
-builder.Services.AddHttpClient<ILlmAnalyzer, OllamaLlmClient>(c =>
-{
-    c.BaseAddress = new Uri(ollamaBase);
-    c.Timeout = TimeSpan.FromMinutes(15); // large models can take a while per report
-});
+// AI analysis runs against a remote Ollama server: OLLAMA_URL + OLLAMA_MODEL env vars.
+// The chunked-analysis pipeline (small chained prompts) keeps each request fast.
+builder.Services.AddSingleton<ILlmAnalyzer, OllamaLlmClient>();
 builder.Services.AddSingleton<IRapidApiClient, PlaywrightRapidApiClient>();
 
 // MySQL repository (EF Core code-first; connection string from env var or config)
@@ -51,6 +47,7 @@ builder.Services.AddHangfireServer(options =>
     options.WorkerCount = builder.Configuration.GetValue("Hangfire:Workers", 2));
 
 builder.Services.AddSingleton<CrawlJobCoordinator>();
+builder.Services.AddSingleton<AnalysisProgressService>();
 builder.Services.AddTransient<CrawlJobService>();
 
 var app = builder.Build();

@@ -5,7 +5,7 @@
     ViewData["Title"] = "Report";
     var runs = (List<RapidApiCrawler.Domain.SearchRun>)ViewBag.Runs!;
     var selected = Model.RunId;
-    var llamaConfigured = (bool)ViewBag.LlamaConfigured!;
+    var ollamaConfigured = (bool)ViewBag.OllamaConfigured!;
 }
 
 <h4 class="mb-3">AI Gap Analysis Report</h4>
@@ -26,26 +26,116 @@
 {
     <form asp-action="Generate" asp-route-runId="@selected" method="post" class="mb-3">
         <button type="submit" class="btn btn-success btn-sm"
-                onclick="this.disabled=true; this.textContent='Generating… (reload in a few minutes)';">
+                onclick="this.disabled=true; this.textContent='Generating… (progress shown below)'; sessionStorage.setItem('analysisRunning_@selected','1');">
             🤖 Generate / regenerate report for run #@selected
         </button>
-        @if (!llamaConfigured)
+        @if (!ollamaConfigured)
         {
             <span class="text-danger small ms-2">
-                ⚠ No LLM model configured — set LLAMA_MODEL_PATH (env var) or Llama:ModelPath, and mount a .gguf file into the container.
+                ⚠ Ollama not configured — set OLLAMA_URL (e.g. http://host.docker.internal:11434) and OLLAMA_MODEL env vars.
             </span>
         }
     </form>
+
+    @* Live AI-analysis progress: polled from /Report/AnalysisProgress while the job runs *@
+    <div id="analysis-progress-panel" class="card mb-3 border-primary d-none">
+        <div class="card-body py-3">
+            <div class="d-flex justify-content-between mb-1">
+                <strong>
+                    <span class="spinner-border spinner-border-sm text-primary me-2" role="status"
+                          id="analysis-progress-spinner"></span>AI Gap Analysis — run #@selected
+                </strong>
+                <span id="analysis-progress-percent" class="fw-bold">0%</span>
+            </div>
+            <div class="progress mb-2" style="height: 1.4rem;">
+                <div id="analysis-progress-bar"
+                     class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+                     role="progressbar" style="width: 0%">0%</div>
+            </div>
+            <small id="analysis-progress-step" class="text-muted">Waiting to start…</small>
+            <div id="analysis-progress-error" class="text-danger small mt-2 d-none"></div>
+        </div>
+    </div>
 }
 
 @if (string.IsNullOrWhiteSpace(Model.Report))
 {
     <p class="text-muted">
-        No report available yet. Click <strong>Generate report</strong> above — the local LLM analyzes
+        No report available yet. Click <strong>Generate report</strong> above — the AI analyzes
         every listing found by the selected run and writes the gap-analysis here.
     </p>
 }
 else
 {
     <pre style="white-space:pre-wrap; font-family: inherit;">@Model.Report</pre>
+}
+
+@if (selected.HasValue)
+{
+    <script>
+        (function () {
+            const runId = @selected;
+            const panel = document.getElementById('analysis-progress-panel');
+            const bar = document.getElementById('analysis-progress-bar');
+            const percentLabel = document.getElementById('analysis-progress-percent');
+            const stepLabel = document.getElementById('analysis-progress-step');
+            const errorBox = document.getElementById('analysis-progress-error');
+            let reloaded = false;
+
+            function showPanel(visible) { panel.classList.toggle('d-none', !visible); }
+
+            async function poll() {
+                try {
+                    const res = await fetch('@Url.Action("AnalysisProgress", "Report")?runId=' + runId, { cache: 'no-store' });
+                    const data = await res.json();
+
+                    if (data.status === 'running') {
+                        sessionStorage.setItem('analysisRunning_' + runId, '1');
+                        showPanel(true);
+                        errorBox.classList.add('d-none');
+                        bar.classList.add('progress-bar-animated');
+                        const pct = Number(data.percent) || 0;
+                        bar.style.width = pct + '%';
+                        bar.textContent = pct + '%';
+                        percentLabel.textContent = pct + '%';
+                        let stepText = data.message || '';
+                        if (data.totalRequests > 0) {
+                            stepText += ` (${data.completedRequests}/${data.totalRequests} LLM requests done)`;
+                        }
+                        stepLabel.textContent = stepText;
+                    } else if (data.status === 'completed') {
+                        sessionStorage.removeItem('analysisRunning_' + runId);
+                        showPanel(false);
+                        // The report is on disk now — reload once so it renders.
+                        if (!reloaded && !document.querySelector('.alert-danger')) {
+                            reloaded = true;
+                            location.reload();
+                        }
+                    } else if (data.status === 'failed') {
+                        sessionStorage.removeItem('analysisRunning_' + runId);
+                        showPanel(true);
+                        bar.classList.remove('progress-bar-animated');
+                        bar.style.width = '100%';
+                        bar.className = 'progress-bar bg-danger';
+                        bar.textContent = 'Failed';
+                        percentLabel.textContent = '';
+                        stepLabel.textContent = '';
+                        errorBox.textContent = data.message || 'The analysis failed. Check the container logs.';
+                        errorBox.classList.remove('d-none');
+                    } else {
+                        showPanel(false);
+                    }
+                } catch (err) { /* transient network hiccup — keep polling */ }
+            }
+
+            // Resume polling when arriving back on the page mid-generation
+            // (the Generate button sets this flag before its POST round-trip).
+            if (sessionStorage.getItem('analysisRunning_' + runId)) {
+                showPanel(true);
+            }
+
+            poll();
+            setInterval(poll, 2000);
+        })();
+    </script>
 }

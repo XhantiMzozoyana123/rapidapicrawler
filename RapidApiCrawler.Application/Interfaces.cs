@@ -20,6 +20,21 @@ public interface IRapidApiClient
 public interface ILlmAnalyzer
 {
     Task<string> AnalyzeAsync(string keyword, string combinedContext, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same as <see cref="AnalyzeAsync"/> but reports incremental progress (e.g. token
+    /// counts streamed from the LLM backend) through <paramref name="progress"/>.
+    /// <param name="progress" />.
+    /// </summary>
+    Task<string> AnalyzeAsync(string keyword, string combinedContext, IProgress<string> progress, CancellationToken ct = default);
+
+    /// <summary>
+    /// Low-level single-prompt completion. Sends an arbitrary prompt to the LLM and returns
+    /// the generated text. The chunked-analysis pipeline calls this repeatedly with smaller
+    /// prompts (one per listing-batch / report-section) instead of one large
+    /// <see cref="AnalyzeAsync"/> call, dramatically reducing per-request latency.
+    /// </summary>
+    Task<string> CompleteAsync(string prompt, int maxTokens, IProgress<string> progress, CancellationToken ct = default);
 }
 
 public interface ISearchRunRepository

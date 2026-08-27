@@ -14,17 +14,13 @@ using RapidApiCrawler.Infrastructure;
 
 var keyword = args.Length > 0 && !args[0].StartsWith("--") ? args[0] : "instagram scraper";
 var analyze = args.Contains("--analyze");
-var llamaModelPath = ParseArg(args, "--model") ?? Environment.GetEnvironmentVariable("LLAMA_MODEL_PATH") ?? "";
-var gpuLayers = int.TryParse(ParseArg(args, "--gpu-layers"), out var g) ? g : 999;
-var contextSize = int.TryParse(ParseArg(args, "--context"), out var ctx) ? ctx : 4096;
 var max = int.TryParse(ParseArg(args, "--max"), out var m) ? m : 5;
 var headless = !args.Contains("--headed");
 var connectionString = ParseArg(args, "--conn") ?? Environment.GetEnvironmentVariable("MYSQL_CONNECTION_STRING") ?? "";
 
 var services = new ServiceCollection();
-services.AddSingleton(new LlamaOptions { ModelPath = llamaModelPath, GpuLayerCount = gpuLayers, ContextSize = contextSize });
 services.AddSingleton(new ScraperOptions { Headless = headless });
-services.AddSingleton<ILlmAnalyzer, LlamaSharpLlmClient>();
+services.AddSingleton<ILlmAnalyzer, OllamaLlmClient>();
 services.AddSingleton<IRapidApiClient, PlaywrightRapidApiClient>();
 services.AddRapidApiDatabase(connectionString);
 services.AddSingleton<ICsvExporter, CsvExporter>();
@@ -40,8 +36,7 @@ orchestrator.Progress += (_, e) => Console.WriteLine("[crawl] " + e.Message);
 Console.WriteLine($"Keyword : {keyword}");
 Console.WriteLine($"Analyze : {analyze}");
 Console.WriteLine($"Headless: {(headless ? "yes" : "no")}");
-Console.WriteLine($"LLM     : {(llamaModelPath.Length > 0 ? llamaModelPath : "NOT SET (skipping AI)")}");
-Console.WriteLine($"GPU     : {(gpuLayers > 0 ? $"on ({gpuLayers} layers)" : "off (CPU only)")}");
+Console.WriteLine($"LLM     : {(Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? "huihui_ai/Qwen3.8-abliterated:latest")} via {Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://127.0.0.1:11434"}");
 Console.WriteLine($"Database: MySQL{(string.IsNullOrEmpty(connectionString) ? " (NOT SET)" : "")}");
 Console.WriteLine();
 
@@ -83,7 +78,7 @@ try
         return;
     }
 
-    var run = await orchestrator.RunAsync(keyword, analyze && llamaModelPath.Length > 0, cts.Token, max);
+    var run = await orchestrator.RunAsync(keyword, analyze, cts.Token, max);
     Console.WriteLine();
     Console.WriteLine("RUN COMPLETE: " + run.ListingsFound + " APIs | " + run.PagesCrawled + " pages");
 

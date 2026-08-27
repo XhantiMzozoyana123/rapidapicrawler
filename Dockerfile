@@ -19,9 +19,7 @@ RUN dotnet publish RapidApiCrawler.Web/RapidApiCrawler.Web.csproj \
     -o /app/publish
 
 # ---------- Runtime stage ----------
-# CUDA runtime base so libcudart / cublas (needed by LLamaSharp.Backend.Cuda12) exist.
-# The NVIDIA Container Toolkit injects the host driver at run time.
-FROM nvidia/cuda:12.6.0-runtime-ubuntu24.04
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 
 # Install the .NET 10 **ASP.NET Core** runtime (includes the base runtime).
 # (--runtime dotnet alone lacks Microsoft.AspNetCore.App and the app fails

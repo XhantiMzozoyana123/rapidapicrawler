@@ -1,15 +1,51 @@
+using System.Text;
+using System.Text.RegularExpressions;
 using RapidApiCrawler.Domain;
 
 namespace RapidApiCrawler.Application;
 
 public record ProgressEventArgs(string Message);
 
+/// <summary>
+/// Structured progress for the chunked gap-analysis pipeline. Fired whenever the
+/// pipeline starts a new LLM request, finishes one, or receives streamed tokens from
+/// the active one — allowing the UI to show exactly how far the analysis has gotten.
+/// </summary>
+public sealed record AnalysisProgressEventArgs(
+    int RunId,
+    int CompletedRequests,
+    int TotalRequests,
+    int CurrentRequestTokens,
+    int CurrentRequestMaxTokens,
+    string CurrentStep);
+
 public class CrawlOrchestrator(
     IRapidApiClient client,
     ILlmAnalyzer analyzer,
     ISearchRunRepository repository)
 {
+    // --- Chunked-analysis tuning ---
+    // Split the scraped listings into batches of this size for incremental LLM
+    // summarisation. Each batch is sent as a small prompt -> fast on a 7B model.
+    private const int ListingsPerChunk = 25;
+    // Max output tokens per chunk-summary request.
+    private const int ChunkSummaryTokens = 150;
+
     public event EventHandler<ProgressEventArgs>? Progress;
+
+    /// <summary>
+    /// Raised during AI gap-analysis with fine-grained, machine-readable progress
+    /// (requests done vs total, streaming token counts within the current request).
+    /// Subscribed by the web UI's AnalysisProgressService so the Report page can show
+    /// a real percentage instead of a spinner.
+    /// </summary>
+    public event EventHandler<AnalysisProgressEventArgs>? AnalysisProgress;
+
+    /// <summary>Number of report sections emitted by <see cref="BuildSectionPrompts"/>.</summary>
+    private const int SectionCount = 5;
+
+    private static readonly Regex TokenCountRegex =
+        new(@"^Generating\.\.\.\s+(\d+) tokens", RegexOptions.Compiled);
 
     private void Report(string message) => Progress?.Invoke(this, new ProgressEventArgs(message));
 
@@ -58,13 +94,13 @@ public class CrawlOrchestrator(
 
         if (analyzeWithLlm && run.ListingsFound > 0)
         {
-            Report("Requesting competitor gap analysis from Google AI...");
-            var context = await BuildContext(run.Id);
-            var reportText = await analyzer.AnalyzeAsync(keyword, context, ct);
+            Report("Starting chunked gap-analysis (local LLM)...");
+            var listings = await repository.GetListingsAsync(run.Id);
+            var reportText = await GenerateChunkedReportAsync(run.Id, keyword, listings, ct);
             await repository.AddReportAsync(new AnalysisReport
             {
                 SearchRunId = run.Id,
-                Model = "llama-local",
+                Model = "chunked-local-llm",
                 ReportText = reportText
             });
             Report("Analysis report saved.");
@@ -119,10 +155,6 @@ public class CrawlOrchestrator(
         return run;
     }
 
-    /// <summary>
-    /// Runs the local-LLM gap-analysis for an already-completed crawl run and stores
-    /// the resulting report (used by the Report page's "Generate report" button).
-    /// </summary>
     public async Task<string> AnalyzeExistingRunAsync(int runId, CancellationToken ct = default)
     {
         var listings = await repository.GetListingsAsync(runId);
@@ -131,17 +163,16 @@ public class CrawlOrchestrator(
                 $"Run #{runId} has no listings to analyze — run a crawl first.");
 
         var run = (await repository.GetRunsAsync()).FirstOrDefault(r => r.Id == runId)
-                  ?? throw new InvalidOperationException($"Run #{runId} not found.");
+                ?? throw new InvalidOperationException($"Run #{runId} not found.");
 
-        Report($"Generating gap-analysis report for run #{runId} '{run.Keyword}' ({listings.Count} listings)...");
+        Report($"Generating chunked gap-analysis report for run #{runId} '{run.Keyword}' ({listings.Count} listings)...");
 
-        var context = await BuildContext(runId);
-        var reportText = await analyzer.AnalyzeAsync(run.Keyword, context, ct);
+        var reportText = await GenerateChunkedReportAsync(runId, run.Keyword, listings, ct);
 
         await repository.AddReportAsync(new AnalysisReport
         {
             SearchRunId = runId,
-            Model = "llama-local",
+            Model = "chunked-local-llm",
             ReportText = reportText
         });
 
@@ -149,14 +180,168 @@ public class CrawlOrchestrator(
         return reportText;
     }
 
-    private async Task<string> BuildContext(int runId)
+    /// <summary>
+    /// Builds a gap-analysis report by breaking the workload into multiple smaller
+    /// chained LLM requests: first summarising listing chunks, then generating each
+    /// report section separately. This is significantly faster than a single
+    /// monolithic request on a 7B local model because each individual inference has
+    /// a much smaller context window and output budget.
+    /// </summary>
+    private async Task<string> GenerateChunkedReportAsync(
+        int runId,
+        string keyword,
+        List<ApiListing> listings,
+        CancellationToken ct)
     {
-        // Summarize listings so the LLM sees real signals.
-        var listings = await repository.GetListingsAsync(runId);
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"Competitor APIs found for keyword search on RapidAPI:");
-        foreach (var l in listings)
-            sb.AppendLine($"- {l.Name} (provider: {l.Provider}, slug: {l.ApiSlug})");
-        return sb.ToString();
+        Report($"Building gap-analysis report for '{keyword}' ({listings.Count} listings)...");
+
+        // Step 1: Chunk the listings and summarise each batch separately.
+        var listingLines = listings
+            .Select(l => $"- {l.Name} (provider: {l.Provider}, slug: {l.ApiSlug})")
+            .ToArray();
+        var chunks = listingLines.Chunk(ListingsPerChunk).ToArray();
+        var summaries = new List<string>();
+
+        // --- Fine-grained progress plumbing ---
+        // totalRequests = one summary request per chunk + one per report section.
+        var totalRequests = chunks.Length + SectionCount;
+        var completedRequests = 0;
+        string currentStep = string.Empty;
+        int currentMaxTokens = 0;
+
+        void BeginStep(int maxTokens, string name)
+        {
+            currentStep = name;
+            currentMaxTokens = maxTokens;
+            AnalysisProgress?.Invoke(this, new AnalysisProgressEventArgs(
+                runId, completedRequests, totalRequests, 0, maxTokens, name));
+        }
+
+        void EndStep()
+        {
+            completedRequests++;
+            AnalysisProgress?.Invoke(this, new AnalysisProgressEventArgs(
+                runId, completedRequests, totalRequests, 0, currentMaxTokens, currentStep));
+        }
+
+        // Reports streamed token counts of the active request up to the UI.
+        var progress = new Progress<string>(msg =>
+        {
+            Report(msg);
+            var m = TokenCountRegex.Match(msg);
+            if (m.Success)
+            {
+                AnalysisProgress?.Invoke(this, new AnalysisProgressEventArgs(
+                    runId, completedRequests, totalRequests,
+                    int.Parse(m.Groups[1].Value), currentMaxTokens, currentStep));
+            }
+        });
+
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var batchText = string.Join("\n", chunks[i]);
+            BeginStep(ChunkSummaryTokens, $"Summarising API batch {i + 1} of {chunks.Length}");
+            Report($"Summarising chunk {i + 1}/{chunks.Length} ({chunks[i].Length} APIs)...");
+
+            var chunkPrompt = $@"You are a market research analyst reviewing RapidAPI listings.
+Extract the key API names, providers, and any notable themes or patterns from the
+following list. Keep it concise — a few bullet points.
+
+Listings for ""{keyword}"":
+{batchText}
+
+Summary of notable APIs and themes:";
+
+            var summary = await analyzer.CompleteAsync(chunkPrompt, ChunkSummaryTokens, progress, ct);
+            summaries.Add(summary);
+            EndStep();
+        }
+
+        // Step 2: Combine all chunk summaries into a condensed context.
+        var condensedContext = string.Join("\n\n---\n\n", summaries);
+        Report($"Condensed {listings.Count} listings into {summaries.Count} summary chunk(s).");
+
+        // Step 3: Generate each report section as a separate, smaller request.
+        var sections = BuildSectionPrompts(keyword, condensedContext);
+
+        var report = new StringBuilder();
+        report.AppendLine($"# Gap-Analysis Report: {keyword}");
+        report.AppendLine();
+
+        foreach (var (title, prompt, maxTokens) in sections)
+        {
+            ct.ThrowIfCancellationRequested();
+            BeginStep(maxTokens, $"Writing {title}");
+            Report($"Generating {title}...");
+            var sectionText = await analyzer.CompleteAsync(prompt, maxTokens, progress, ct);
+            report.AppendLine($"## {title}");
+            report.AppendLine();
+            report.AppendLine(sectionText.Trim());
+            report.AppendLine();
+            EndStep();
+        }
+
+        Report("Gap-analysis report complete.");
+        return report.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Builds the prompt + token budget for each report section.
+    /// Each section is generated in its own LLM request so the model never has to
+    /// produce the entire report in a single 1200-token pass.
+    /// </summary>
+    private static (string Title, string Prompt, int MaxTokens)[] BuildSectionPrompts(string keyword, string condensedContext)
+    {
+        return new[]
+        {
+            ("1. Market Overview",
+             $@"You are a market research analyst. Based on the following summarised
+competitor APIs found on RapidAPI for keyword ""{keyword}"", write a concise
+2-3 sentence market overview describing the overall market and key players.
+
+{condensedContext}
+
+Market Overview:", 200),
+
+            ("2. Competitor Landscape (table)",
+             $@"Based on the following summarised competitor APIs on RapidAPI for
+keyword ""{keyword}"", create a markdown table with columns:
+| # | API | Provider | Focus | Notes |
+List up to 12 significant competitors.
+
+{condensedContext}
+
+Competitor Landscape:", 500),
+
+            ("3. Gaps & Underserved Needs",
+             $@"Based on the following competitor APIs on RapidAPI for keyword
+""{keyword}"", identify 3-5 specific market gaps and underserved needs that present
+clear opportunities for new API providers.
+
+{condensedContext}
+
+Gaps & Underserved Needs:", 400),
+
+            ("4. Recommended APIs to Build (top 3)",
+             $@"Based on the gaps identified in the competitor landscape for
+""{keyword}"" on RapidAPI, recommend 3 innovative API product ideas to build.
+For each: (1) target users, (2) key endpoints, (3) differentiation.
+Format as clear bullet points.
+
+{condensedContext}
+
+Recommended APIs:", 600),
+
+            ("5. Risks",
+             $@"Based on the following competitor landscape for ""{keyword}"" APIs,
+identify 3 key risks for building APIs in this space (e.g. platform dependency,
+rate limits, market saturation).
+
+{condensedContext}
+
+Risks:", 300),
+        };
     }
 }

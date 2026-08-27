@@ -15,17 +15,20 @@ public class CrawlJobService
     private readonly CrawlOrchestrator _orchestrator;
     private readonly CrawlJobCoordinator _coordinator;
     private readonly ScraperOptions _scraperOptions;
+    private readonly AnalysisProgressService _analysisProgress;
     private readonly ILogger<CrawlJobService> _logger;
 
     public CrawlJobService(
         CrawlOrchestrator orchestrator,
         CrawlJobCoordinator coordinator,
         ScraperOptions scraperOptions,
+        AnalysisProgressService analysisProgress,
         ILogger<CrawlJobService> logger)
     {
         _orchestrator = orchestrator;
         _coordinator = coordinator;
         _scraperOptions = scraperOptions;
+        _analysisProgress = analysisProgress;
         _logger = logger;
     }
 
@@ -64,6 +67,7 @@ public class CrawlJobService
         {
             _logger.LogInformation("Starting crawl '{Keyword}' (job {JobId}).", kw, jobId);
             var run = await _orchestrator.RunAsync(kw, analyze, CancellationToken.None, maxListings);
+            if (analyze) _analysisProgress.MarkCompleted(run.Id);
             _coordinator.Complete(jobId, run.Id, run.ListingsFound, run.PagesCrawled);
             _logger.LogInformation("Crawl job {JobId} completed run #{RunId} ({Listings} listings, {Pages} pages).",
                 jobId, run.Id, run.ListingsFound, run.PagesCrawled);
@@ -87,16 +91,19 @@ public class CrawlJobService
         void Handler(object? _, ProgressEventArgs e) => _coordinator.Append(jobId, e.Message);
 
         _orchestrator.Progress += Handler;
+        _analysisProgress.Start(runId);
         try
         {
             _logger.LogInformation("Starting gap-analysis for run #{RunId} (job {JobId}).", runId, jobId);
             var text = await _orchestrator.AnalyzeExistingRunAsync(runId, CancellationToken.None);
+            _analysisProgress.MarkCompleted(runId);
             _coordinator.Complete(jobId, runId, 0, 0);
             _coordinator.Append(jobId, "=== REPORT READY — see the Report page ===");
             _logger.LogInformation("Gap-analysis job {JobId} completed ({Length} chars).", jobId, text.Length);
         }
         catch (Exception ex)
         {
+            _analysisProgress.MarkFailed(runId, ex.Message);
             _coordinator.Fail(jobId, ex.Message);
             _logger.LogError(ex, "Gap-analysis job {JobId} failed.", jobId);
             throw;
@@ -128,6 +135,7 @@ public class CrawlJobService
         {
             _logger.LogInformation("Starting 'Popular APIs' scrape (job {JobId}).", jobId);
             var run = await _orchestrator.RunPopularAsync(analyze, CancellationToken.None, maxListings);
+            if (analyze) _analysisProgress.MarkCompleted(run.Id);
             _coordinator.Complete(jobId, run.Id, run.ListingsFound, run.PagesCrawled);
             _logger.LogInformation("Popular crawl job {JobId} completed run #{RunId}.", jobId, run.Id);
         }

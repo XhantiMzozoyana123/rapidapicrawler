@@ -21,11 +21,9 @@ namespace RapidApiCrawler
             var connectionString = Environment.GetEnvironmentVariable("MYSQL_CONNECTION_STRING") ?? string.Empty;
             builder.Services.AddRapidApiDatabase(connectionString);
 
-            // Local LLM via LLamaSharp — point LLAMA_MODEL_PATH at a .gguf model file.
-            var llamaModelPath = Environment.GetEnvironmentVariable("LLAMA_MODEL_PATH") ?? string.Empty;
-            builder.Services.AddSingleton(new LlamaOptions { ModelPath = llamaModelPath });
+            // Remote LLM via Ollama HTTP API — point OLLAMA_URL at the VPS host.
             builder.Services.AddSingleton(new ScraperOptions { Headless = true });
-            builder.Services.AddSingleton<ILlmAnalyzer, LlamaSharpLlmClient>();
+            builder.Services.AddSingleton<ILlmAnalyzer, OllamaLlmClient>();
             builder.Services.AddSingleton<IRapidApiClient, PlaywrightRapidApiClient>();
             builder.Services.AddSingleton<ICsvExporter, CsvExporter>();
             builder.Services.AddSingleton<CrawlOrchestrator>();
