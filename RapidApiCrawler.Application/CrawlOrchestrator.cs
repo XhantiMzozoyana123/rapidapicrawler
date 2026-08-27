@@ -345,11 +345,16 @@ Summary of notable APIs, themes and customer feedback:";
         var condensedContext = string.Join("\n\n---\n\n", summaries);
         Report($"Condensed {listings.Count} listings into {summaries.Count} summary chunk(s).");
 
-        // Step 3: Generate each report section as a separate, smaller request.
+        // Step 3: Generate each report section as a separate, smaller request — with
+        // validation and one repair pass per section so truncated or malformed output
+        // never reaches the saved report.
         var sections = BuildSectionPrompts(keyword, condensedContext);
 
         var report = new StringBuilder();
         report.AppendLine($"# Gap-Analysis Report: {keyword}");
+        report.AppendLine($"_Run #{runId} · {listings.Count} APIs analysed · " +
+                          $"{overviewTextByListing.Count} overviews · {commentsTextByListing.Count} listings with customer discussions · " +
+                          $"generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC_");
         report.AppendLine();
 
         foreach (var (title, prompt, maxTokens) in sections)
@@ -357,7 +362,21 @@ Summary of notable APIs, themes and customer feedback:";
             ct.ThrowIfCancellationRequested();
             BeginStep(maxTokens, $"Writing {title}");
             Report($"Generating {title}...");
+
             var sectionText = await analyzer.CompleteAsync(prompt, maxTokens, progress, ct);
+
+            // Validate; if the response looks incomplete/malformed, regenerate once with
+            // corrective feedback instead of saving a broken section.
+            for (var attempt = 2; !ValidateSection(title, sectionText) && attempt <= 3; attempt++)
+            {
+                Report($"{title}: output failed validation (attempt {attempt - 1}) — regenerating...");
+                sectionText = await analyzer.CompleteAsync(
+                    prompt + "\n\nIMPORTANT: Your previous response was rejected because it was incomplete, " +
+                    "truncated mid-sentence, or violated the format instructions above. Produce the FULL " +
+                    "section this time, follow the exact requested structure/counts, and finish every sentence.",
+                    maxTokens, progress, ct);
+            }
+
             report.AppendLine($"## {title}");
             report.AppendLine();
             report.AppendLine(sectionText.Trim());
@@ -370,61 +389,128 @@ Summary of notable APIs, themes and customer feedback:";
     }
 
     /// <summary>
+    /// Heuristic quality gate applied to each generated report section before it is saved.
+    /// Rejects empty responses, ultra-short responses (likely refusals), text that ends
+    /// mid-sentence (token-budget truncation), and count violations for structured
+    /// sections (gaps must list 3–5 items, recommendations exactly 3).
+    /// </summary>
+    private static bool ValidateSection(string title, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var trimmed = text.Trim();
+        if (trimmed.Length < 150) return false;
+
+        // Truncation heuristic: the final line should terminate cleanly.
+        var lastLine = trimmed.Split('\n').LastOrDefault()?.Trim() ?? string.Empty;
+        if (lastLine.Length > 25 && !Regex.IsMatch(lastLine, @"[.!?:;\)\]""*`\d]$"))
+            return false;
+
+        if (title.Contains("Gaps", StringComparison.OrdinalIgnoreCase))
+        {
+            var items = Regex.Matches(trimmed, @"(?m)^\s*(?:\d+[\.\)]|[-*•])\s+\S").Count;
+            if (items < 3 || items > 5) return false;
+        }
+
+        if (title.Contains("Recommended", StringComparison.OrdinalIgnoreCase))
+        {
+            var ideas = Regex.Matches(trimmed, @"(?m)^\s*(?:\d+[\.\)]|[🥇🥈🥉]|Idea\s*\d)", RegexOptions.IgnoreCase).Count;
+            if (ideas < 3) return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Builds the prompt + token budget for each report section.
-    /// Each section is generated in its own LLM request so the model never has to
-    /// produce the entire report in a single 1200-token pass.
+    /// Design principles: every claim is separated into OBSERVED evidence (from actual
+    /// customer reviews) vs AI INTERPRETATION; competitors are classified by relevance
+    /// instead of assuming everything in the search results competes; and every
+    /// opportunity receives quantitative scores so ideas can be ranked.
     /// </summary>
     private static (string Title, string Prompt, int MaxTokens)[] BuildSectionPrompts(string keyword, string condensedContext)
     {
+        const string GroundingRules = @"
+CRITICAL RULES:
+1. EVIDENCE FIRST. For every claim state whether it is:
+   - [OBSERVED] — comes directly from actual customer reviews/discussion quoted in the context.
+   - [INFERRED] — your own interpretation where no direct customer evidence exists.
+2. NEVER invent customer complaints or requests. If the context contains no customer
+   feedback on a topic, say 'No direct customer evidence found' instead of assuming demand.
+3. QUANTIFY evidence whenever possible, e.g. '14 reviews mention quota problems'. If exact
+   counts are unavailable, use approximate counts ('several', 'one review') — never inflate.
+4. CLASSIFY competitors by relevance to the target problem space:
+   Direct = same data/function for same customers · Adjacent = similar customers, different
+   problem · Irrelevant = appeared only due to keyword overlap. Label each one.
+You may only claim what the context supports.";
+
         return new[]
         {
             ("1. Market Overview",
-             $@"You are a market research analyst. Based on the following summarised
-competitor APIs found on RapidAPI for keyword ""{keyword}"", write a concise
-2-3 sentence market overview describing the overall market and key players.
+             $@"You are a rigorous market research analyst. Based on the summarised APIs found
+on RapidAPI for keyword ""{keyword}"", write a concise market overview (3-5 sentences):
+what the space covers, who the key players are, and how many of the found APIs are actually
+relevant to the core problem vs merely related.{GroundingRules}
 
 {condensedContext}
 
-Market Overview:", 200),
+Market Overview:", 300),
 
-            ("2. Competitor Landscape (table)",
-             $@"Based on the following summarised competitor APIs on RapidAPI for
-keyword ""{keyword}"", create a markdown table with columns:
-| # | API | Provider | Focus | Notes |
-List up to 12 significant competitors.
-
-{condensedContext}
-
-Competitor Landscape:", 500),
-
-            ("3. Gaps & Underserved Needs",
-             $@"Based on the following competitor APIs on RapidAPI for keyword
-""{keyword}"", identify 3-5 specific market gaps and underserved needs that present
-clear opportunities for new API providers. Where customer comments were included in the
-context, ground each gap in what users actually complained about or requested.
+            ("2. Competitor Landscape (classified table)",
+             $@"Based on the summarised APIs on RapidAPI for keyword ""{keyword}"", create a
+markdown table with EXACTLY these columns:
+| # | API | Provider | Relevance | Focus | Customer Sentiment |
+Relevance must be one of: DIRECT / ADJACENT / IRRELEVANT (with a 5-word justification in
+the Focus column). Include up to 12 significant APIs. Do NOT count IRRELEVANT ones as
+competitors in later sections. In Customer Sentiment summarise that API's reviews if any
+were captured ('no reviews captured' otherwise).{GroundingRules}
 
 {condensedContext}
 
-Gaps & Underserved Needs:", 400),
+Competitor Landscape:", 700),
 
-            ("4. Recommended APIs to Build (top 3)",
-             $@"Based on the gaps identified and the customer feedback found in the
-competitor landscape for ""{keyword}"" on RapidAPI, recommend 3 innovative API product
-ideas to build. Prefer ideas that directly address pain points customers complained about.
-For each: (1) target users, (2) key endpoints, (3) differentiation.
-
-{condensedContext}
-
-Recommended APIs:", 600),
-
-            ("5. Risks",
-             $@"Based on the following competitor landscape for ""{keyword}"" APIs,
-identify 3 key risks for building APIs in this space (e.g. platform dependency,
-rate limits, market saturation).
+            ("3. Gaps & Underserved Needs (evidence-ranked)",
+             $@"Identify EXACTLY 4 specific market gaps for keyword ""{keyword}"" on RapidAPI.
+For EACH gap output this structure:
+- **Gap N: <name>**
+  - Evidence: <quote/paraphrase actual customer complaints with counts, e.g. '8 reviews
+    across 3 APIs mention quota problems'> or 'No direct customer evidence found'
+  - Interpretation: <your analysis of why this gap exists>
+  - Opportunity hypothesis: <what could be built, framed as a hypothesis>
+Order gaps by strength of supporting evidence. Exactly 4 gaps, no more, no less.{GroundingRules}
 
 {condensedContext}
 
-Risks:", 300),
+Gaps & Underserved Needs:", 600),
+
+            ("4. Recommended APIs to Build (scored & ranked)",
+             $@"Recommend exactly 3 API product ideas for ""{keyword}"", ranked best-first with
+🥇 🥈 🥉 medals. For EACH idea output:
+- **<Medal> Idea N: <name>**
+  - Evidence base: <which observed complaints/patterns support this, WITH counts; write
+    'Weak evidence' explicitly if only inference supports it>
+  - Target users: ...
+  - Key endpoints: ...
+  - Differentiation: ...
+  - Scores: Demand X/10 · Customer Pain X/10 · Competition (lower=better) X/10 ·
+    Market Saturation (lower=better) X/10 · Build Difficulty X/10 · Evidence Strength X/10
+  - **Opportunity Score: X.X/10** = weighted blend you justify in one sentence.
+Scores must be internally consistent with the evidence (a weakly-evidenced idea cannot
+score 9+ on Demand).{GroundingRules}
+
+{condensedContext}
+
+Recommended APIs:", 900),
+
+            ("5. Risks & Data Limitations",
+             $@"Identify 3 key risks for building APIs in the ""{keyword}"" space (platform
+dependency, rate limits, saturation...), THEN add a final subsection '## Analysis
+Limitations' honestly listing what this report does NOT know: which APIs lacked captured
+reviews, sample sizes available, and where conclusions rest on inference rather than
+evidence.{GroundingRules}
+
+{condensedContext}
+
+Risks & Data Limitations:", 450),
         };
     }
 }
