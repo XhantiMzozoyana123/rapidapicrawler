@@ -19,7 +19,7 @@ public sealed record AnalysisProgressEventArgs(
     int CurrentRequestMaxTokens,
     string CurrentStep);
 
-public class CrawlOrchestrator(
+public partial class CrawlOrchestrator(
     IRapidApiClient client,
     ILlmAnalyzer analyzer,
     ISearchRunRepository repository)
@@ -187,6 +187,27 @@ public class CrawlOrchestrator(
     /// monolithic request on a 7B local model because each individual inference has
     /// a much smaller context window and output budget.
     /// </summary>
+    /// <summary>
+    /// Strips HTML tags/entities from a captured discussions page down to plain text.
+    /// Deliberately dependency-free (regex-based) so the Application layer needs no parser.
+    /// </summary>
+    [GeneratedRegex(@"<script[\s\S]*?</script>|<style[\s\S]*?</style>", RegexOptions.IgnoreCase)]
+    private static partial Regex ScriptStyleRegex();
+
+    [GeneratedRegex(@"<[^>]+>")]
+    private static partial Regex TagRegex();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
+
+    private static string ExtractCommentText(string html)
+    {
+        var text = ScriptStyleRegex().Replace(html, " ");
+        text = TagRegex().Replace(text, " ");
+        text = System.Net.WebUtility.HtmlDecode(text);
+        return WhitespaceRegex().Replace(text, " ").Trim();
+    }
+
     private async Task<string> GenerateChunkedReportAsync(
         int runId,
         string keyword,
@@ -195,9 +216,39 @@ public class CrawlOrchestrator(
     {
         Report($"Building gap-analysis report for '{keyword}' ({listings.Count} listings)...");
 
-        // Step 1: Chunk the listings and summarise each batch separately.
+        // Pull every customer discussion/comment page captured during the crawl and group
+        // the extracted plain text by listing, so the model can factor in what users of
+        // each API actually said (complaints, praise, feature requests).
+        var commentTextByListing = new Dictionary<int, string>();
+        try
+        {
+            var pages = await repository.GetDiscussionPagesAsync(runId);
+            foreach (var group in pages.GroupBy(p => p.ListingId))
+            {
+                var combined = string.Join(" ",
+                    group.Select(p => ExtractCommentText(p.Html))
+                         .Where(t => t.Length > 0));
+                if (combined.Length > 0)
+                    commentTextByListing[group.Key] =
+                        combined.Length > 1500 ? combined[..1500] + "…" : combined;
+            }
+            Report($"Loaded customer comments for {commentTextByListing.Count} of {listings.Count} listings.");
+        }
+        catch (Exception ex)
+        {
+            Report($"WARNING: could not load discussions ({ex.Message}) — analysing listings only.");
+        }
+
+        // Step 1: Chunk the listings and summarise each batch separately. Listings with
+        // customer comments get those appended so complaints/requests are summarised too.
         var listingLines = listings
-            .Select(l => $"- {l.Name} (provider: {l.Provider}, slug: {l.ApiSlug})")
+            .Select(l =>
+            {
+                var line = $"- {l.Name} (provider: {l.Provider}, slug: {l.ApiSlug})";
+                if (commentTextByListing.TryGetValue(l.Id, out var comments))
+                    line += $"\n  Customer comments: \"{comments}\"";
+                return line;
+            })
             .ToArray();
         var chunks = listingLines.Chunk(ListingsPerChunk).ToArray();
         var summaries = new List<string>();
@@ -246,13 +297,14 @@ public class CrawlOrchestrator(
             Report($"Summarising chunk {i + 1}/{chunks.Length} ({chunks[i].Length} APIs)...");
 
             var chunkPrompt = $@"You are a market research analyst reviewing RapidAPI listings.
-Extract the key API names, providers, and any notable themes or patterns from the
-following list. Keep it concise — a few bullet points.
+Extract the key API names, providers, notable themes, AND any customer sentiment from the
+following list. Some listings include real customer comments — capture recurring complaints,
+praise, and unmet needs. Keep it concise — a few bullet points.
 
 Listings for ""{keyword}"":
 {batchText}
 
-Summary of notable APIs and themes:";
+Summary of notable APIs, themes and customer feedback:";
 
             var summary = await analyzer.CompleteAsync(chunkPrompt, ChunkSummaryTokens, progress, ct);
             summaries.Add(summary);
@@ -318,17 +370,18 @@ Competitor Landscape:", 500),
             ("3. Gaps & Underserved Needs",
              $@"Based on the following competitor APIs on RapidAPI for keyword
 ""{keyword}"", identify 3-5 specific market gaps and underserved needs that present
-clear opportunities for new API providers.
+clear opportunities for new API providers. Where customer comments were included in the
+context, ground each gap in what users actually complained about or requested.
 
 {condensedContext}
 
 Gaps & Underserved Needs:", 400),
 
             ("4. Recommended APIs to Build (top 3)",
-             $@"Based on the gaps identified in the competitor landscape for
-""{keyword}"" on RapidAPI, recommend 3 innovative API product ideas to build.
+             $@"Based on the gaps identified and the customer feedback found in the
+competitor landscape for ""{keyword}"" on RapidAPI, recommend 3 innovative API product
+ideas to build. Prefer ideas that directly address pain points customers complained about.
 For each: (1) target users, (2) key endpoints, (3) differentiation.
-Format as clear bullet points.
 
 {condensedContext}
 

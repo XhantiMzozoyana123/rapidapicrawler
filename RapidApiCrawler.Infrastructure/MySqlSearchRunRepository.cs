@@ -120,6 +120,17 @@ public class MySqlSearchRunRepository : ISearchRunRepository
                       select page).CountAsync();
     }
 
+    public async Task<List<CrawledPage>> GetDiscussionPagesAsync(int runId)
+    {
+        await using var ctx = _factory.CreateDbContext();
+        return await (from page in ctx.CrawledPages
+                      join listing in ctx.ApiListings on page.ListingId equals listing.Id
+                      where listing.SearchRunId == runId
+                         && page.PageType == PageTypes.Discussions
+                      orderby page.ListingId, page.Id
+                      select page).ToListAsync();
+    }
+
     // ---- Raw table browser (MetaData table inspection) ----
 
     private string GetConnectionString()
