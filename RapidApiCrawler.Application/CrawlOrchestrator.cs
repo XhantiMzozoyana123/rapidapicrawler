@@ -20,6 +20,13 @@ public sealed record AnalysisProgressEventArgs(
     int CurrentRequestMaxTokens,
     string CurrentStep);
 
+/// <summary>
+/// One "Recommended API Opportunity" parsed out of a generated gap-analysis report
+/// (the '### 🥇 Idea N: <name>' blocks in section 5). Each is the seed for generating
+/// SEO-optimised RapidAPI listing documentation.
+/// </summary>
+public sealed record RecommendedIdea(int Number, string Name, string? Body);
+
 public partial class CrawlOrchestrator(
     IRapidApiClient client,
     ILlmAnalyzer analyzer,
@@ -694,6 +701,118 @@ Keyword Strategy:";
         FireProgress(2, 0, 0, "Keyword strategy saved.");
         Report("Keyword strategy saved.");
         return strategy.Trim();
+    }
+/// <summary>
+    /// Parses the "Recommended API Opportunities" section of a generated gap-analysis report
+    /// into structured <see cref="RecommendedIdea"/> records. Matches the "### 🥇 Idea N: Name"
+    /// markers (also plain "### Idea N:"), capturing the idea name plus the body up to the next
+    /// idea marker.
+    /// </summary>
+    public static List<RecommendedIdea> ExtractRecommendedIdeas(string? reportText)
+    {
+        var ideas = new List<RecommendedIdea>();
+        if (string.IsNullOrWhiteSpace(reportText))
+            return ideas;
+
+        var markerRegex = new Regex(
+            @"^#{2,3}\s*(?:🥇|🥈|🥉)?\s*Idea\s+(\d+)\s*[:\-]\s*(.+?)\s*$",
+            RegexOptions.Multiline | RegexOptions.Compiled);
+
+        var matches = markerRegex.Matches(reportText);
+        for (var i = 0; i < matches.Count; i++)
+        {
+            var number = int.Parse(matches[i].Groups[1].Value);
+            var name = CleanIdeaName(matches[i].Groups[2].Value);
+
+            var start = matches[i].Index + matches[i].Length;
+            var end = i + 1 < matches.Count ? matches[i + 1].Index : reportText.Length;
+            var body = reportText[start..end].Trim();
+
+            ideas.Add(new RecommendedIdea(number, name,
+                string.IsNullOrWhiteSpace(body) ? null : body));
+        }
+
+        return ideas;
+    }
+
+    private static string CleanIdeaName(string raw)
+    {
+        // Strip leading numbering like "1. " or "1)", trailing colons/dots, and markdown emphasis.
+        var name = System.Text.RegularExpressions.Regex.Replace(raw, @"^\s*\d+[\s\.\):]*", "");
+        name = name.Trim().Trim('*', '#', ':', '.');
+        return string.IsNullOrWhiteSpace(name) ? "Unnamed opportunity" : name;
+    }
+
+    /// <summary>
+    /// Generates SEO-optimised RapidAPI listing documentation for a single recommended API
+    /// opportunity (selected by its number within the run's saved gap-analysis report).
+    /// The output is persisted as an AnalysisReport with Model="seo-listing-{N}" so each idea
+    /// keeps its own document and the SEO Listing page can display them independently.
+    /// </summary>
+    public async Task<string> GenerateSeoDocumentationAsync(int runId, int ideaNumber, CancellationToken ct = default)
+    {
+        var run = (await repository.GetRunsAsync()).FirstOrDefault(r => r.Id == runId)
+                ?? throw new InvalidOperationException($"Run #{runId} not found.");
+
+        var reportText = await repository.GetLatestReportAsync(runId, "chunked-local-llm");
+        if (string.IsNullOrWhiteSpace(reportText))
+            throw new InvalidOperationException(
+                $"Run #{runId} has no gap-analysis report yet — generate one first.");
+
+        var idea = ExtractRecommendedIdeas(reportText).FirstOrDefault(i => i.Number == ideaNumber)
+            ?? throw new InvalidOperationException($"Run #{runId}'s report has no idea #{ideaNumber}.");
+
+        // --- structured progress so the SEO page shows live feedback ---
+        void Fire(int done, int tokens, int budget, string step) =>
+            AnalysisProgress?.Invoke(this, new AnalysisProgressEventArgs(
+                runId, done, 2, tokens, budget, step));
+
+        Report($"Generating SEO listing documentation for: {idea.Name}");
+        Fire(0, 0, 1, "Analysing the recommended opportunity");
+
+        var prompt = BuildSeoListingPrompt(run.Keyword, idea);
+        var progress = new Progress<string>(Report);
+        var doc = await analyzer.CompleteAsync(prompt, 1400, progress, ct);
+
+        var cleaned = doc.Trim();
+        await repository.AddReportAsync(new AnalysisReport
+        {
+            SearchRunId = runId,
+            Model = $"seo-listing-{ideaNumber}",
+            ReportText = cleaned
+        });
+
+        Fire(2, 0, 0, "SEO documentation saved.");
+        Report("SEO listing documentation saved.");
+        return cleaned;
+    }
+
+    private static string BuildSeoListingPrompt(string keyword, RecommendedIdea idea)
+    {
+        return $@"You are a RapidAPI marketplace listing specialist and SEO copywriter.
+Using ONLY the recommended-API opportunity below (which was derived from real crawled RapidAPI
+competitor reviews/discussions), produce a complete, SEO-optimised listing package for a NEW
+RapidAPI listing targeting the ""{keyword}"" market.
+The package MUST be preformatted markdown with EXACTLY these sections (in this order):
+## Recommended API Name            (one short, brandable name — must NOT contain the word API)
+## Short Description               (one sentence, MAX ~160 chars, front-loaded with the most searched keyword)
+## Long Description                (2-4 paragraphs: what it does, ideal use cases, who it's for, key differentiators, grounded in the opportunity's evidence)
+## Tags                             (8-12 comma-separated searchable tags, no ""API"")
+## Primary SEO Keywords            (top 3, from the opportunity + market keyword)
+## Secondary SEO Keywords          (5-8 related phrases)
+## Target Audience
+## Key Use Cases                   (3-5, each with who benefits + why)
+## Key Endpoints                   (4-6 proposed REST endpoints with method + purpose)
+## README (start)                  (concise developer-facing README: overview, a getting-started curl example, auth note, base URL placeholder)
+## Positioning & Differentiation   (how this differs from DIRECT/ADJACENT competitors, based on the opportunity's evidence/complaints)
+
+RULES:
+- Do NOT invent external numbers, customer quotes, or market statistics not present in the opportunity block below.
+- Keep every claim to what the opportunity actually states; where evidence is weak, say so rather than fabricate.
+- Rewrite the opportunity name into a clean, searchable listing name (no ""API"" suffix).
+
+RECOMMENDED OPPORTUNITY:
+{idea.Body ?? idea.Name}";
     }
 
     private static List<CustomerFeedback> ParseFeedbackJson(

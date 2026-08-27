@@ -194,4 +194,37 @@ public class CrawlJobService
             _orchestrator.Progress -= Handler;
         }
     }
+/// <summary>
+    /// Hangfire entry point: generate (or regenerate) the SEO listing documentation for one
+    /// recommended opportunity on a run. Wired to the /SeoListing controller's Generate button.
+    /// </summary>
+    [AutomaticRetry(Attempts = 0)]
+    public async Task RunSeoDocGenerationAsync(string jobId, int runId, int ideaNumber)
+    {
+        void Handler(object? _, ProgressEventArgs e) => _coordinator.Append(jobId, e.Message);
+
+        _orchestrator.Progress += Handler;
+        _analysisProgress.Start(runId);
+        try
+        {
+            _logger.LogInformation("Starting SEO doc generation for run #{RunId} idea #{Idea} (job {JobId}).",
+                runId, ideaNumber, jobId);
+            var text = await _orchestrator.GenerateSeoDocumentationAsync(runId, ideaNumber, CancellationToken.None);
+            _analysisProgress.MarkCompleted(runId);
+            _coordinator.Complete(jobId, runId, 0, 0);
+            _coordinator.Append(jobId, $"=== SEO DOCUMENTATION READY for idea #{ideaNumber} — see the SEO Listing page ===");
+            _logger.LogInformation("SEO doc job {JobId} completed ({Length} chars).", jobId, text.Length);
+        }
+        catch (Exception ex)
+        {
+            _analysisProgress.MarkFailed(runId, ex.Message);
+            _coordinator.Fail(jobId, ex.Message);
+            _logger.LogError(ex, "SEO doc job {JobId} failed.", jobId);
+            throw;
+        }
+        finally
+        {
+            _orchestrator.Progress -= Handler;
+        }
+    }
 }

@@ -1,0 +1,160 @@
+@using RapidApiCrawler.Web.Models
+@model SeoListingViewModel
+@{
+    ViewData["Title"] = "SEO Listing Docs";
+    var runs = (List<RapidApiCrawler.Domain.SearchRun>)ViewBag.Runs!;
+    var selected = Model.RunId;
+    var ollamaConfigured = ViewBag.OllamaConfigured is bool ob ? ob : true;
+}
+
+<h4 class="mb-3">SEO Listing Documentation</h4>
+<p class="text-muted mb-3">
+    Pick a crawl run, pick one of its <strong>recommended API opportunities</strong> (from the
+    gap-analysis report), and generate an SEO-optimised RapidAPI listing document for it — name,
+    descriptions, tags, keywords, use cases, endpoints, README and positioning — to help it get
+    discovered in the marketplace.
+</p>
+
+@if (TempData["SeoStarted"] is string msg)
+{
+    <div class="alert alert-info">@msg</div>
+}
+
+<div class="row g-2 align-items-end mb-3">
+    <div class="col-md-6">
+        <label for="run-select" class="form-label mb-1 fw-semibold">1️⃣ Choose the crawl run</label>
+        <select id="run-select" class="form-select"
+                onchange="if (this.value) window.location = '@Url.Action("Index", "SeoListing")?runId=' + this.value;">
+            @if (!selected.HasValue)
+            {
+                <option value="" selected disabled>— Select a crawl run —</option>
+            }
+            @foreach (var r in runs.OrderByDescending(r => r.Id))
+            {
+                var started = r.StartedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+                <option value="@r.Id" selected="@(selected == r.Id)">Run #@r.Id — "@r.Keyword" (@r.ListingsFound APIs, @started)</option>
+            }
+        </select>
+    </div>
+</div>
+
+@if (!selected.HasValue)
+{
+    <p class="text-muted">Select a run above to see its recommended opportunities.</p>
+}
+else if (!Model.HasReport)
+{
+    <div class="alert alert-warning">
+        @if (Model.ReportError is not null)
+        {
+            <span>@Model.ReportError</span>
+        }
+        else
+        {
+            <span>
+                No gap-analysis report found for run #@selected. Go to the <a asp-controller="Report" asp-action="Index" asp-route-runId="@selected">Report</a>
+                page first and generate one — its "Recommended API Opportunities" are the seeds for these docs.
+            </span>
+        }
+    </div>
+}
+else if (Model.Entries.Count == 0)
+{
+    <div class="alert alert-warning">
+        The report for run #@selected was found, but no <em>Idea N</em> opportunities could be parsed from it.
+        Try regenerating the report, or verify its "Recommended API Opportunities" section is present.
+    </div>
+}
+else
+{
+    <div id="seo-progress-panel" class="card mb-3 border-secondary d-none">
+        <div class="card-body py-3">
+            <div class="d-flex justify-content-between mb-1">
+                <strong>SEO Doc Generation — run #@selected
+                    <span id="seo-progress-status" class="badge bg-secondary ms-2">idle</span>
+                </strong>
+                <span id="seo-progress-percent" class="fw-bold">—</span>
+            </div>
+            <div class="progress mb-2" style="height: 1.4rem;">
+                <div id="seo-progress-bar" class="progress-bar bg-secondary" role="progressbar" style="width: 0%">0%</div>
+            </div>
+            <small id="seo-progress-step" class="text-muted">No generation running.</small>
+        </div>
+    </div>
+
+    @foreach (var entry in Model.Entries)
+    {
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <strong>🥇 Idea #@entry.Number — @entry.Name</strong>
+                <form asp-action="Generate" asp-route-runId="@selected" asp-route-idea="@entry.Number" method="post" class="mb-0">
+                    <button type="submit" class="btn @(entry.HasDoc ? "btn-outline-success" : "btn-success") btn-sm">
+                        @(entry.HasDoc ? "Regenerate SEO listing" : "🤖 Generate SEO listing")
+                    </button>
+                </form>
+            </div>
+            <div class="card-body">
+                @if (entry.HasDoc)
+                {
+                    <pre style="white-space:pre-wrap; font-family: inherit; margin-bottom:0;">@entry.Doc</pre>
+                }
+                else
+                {
+                    <p class="text-muted mb-0">No SEO listing document generated yet. Click <strong>Generate SEO listing</strong> to create one.</p>
+                }
+            </div>
+        </div>
+    }
+}@if (selected.HasValue && Model.HasReport && Model.Entries.Count > 0)
+{
+    <script>
+        (function () {
+            const runId = @selected;
+            const panel = document.getElementById('seo-progress-panel');
+            const bar = document.getElementById('seo-progress-bar');
+            const percentLabel = document.getElementById('seo-progress-percent');
+            const stepLabel = document.getElementById('seo-progress-step');
+            const statusBadge = document.getElementById('seo-progress-status');
+
+            function setBar(pct, color, animated) {
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+                bar.className = 'progress-bar' + (animated ? ' progress-bar-striped progress-bar-animated' : '') + (color ? ' ' + color : '');
+            }
+
+            async function poll() {
+                try {
+                    const res = await fetch('@Url.Action("AnalysisProgress", "SeoListing")?runId=' + runId, { cache: 'no-store' });
+                    const data = await res.json();
+                    statusBadge.textContent = data.status;
+
+                    if (data.status === 'running') {
+                        panel.classList.remove('d-none');
+                        statusBadge.className = 'badge bg-primary ms-2';
+                        setBar(Number(data.percent) || 0, 'bg-primary', true);
+                        percentLabel.textContent = (Number(data.percent) || 0) + '%';
+                        stepLabel.textContent = data.message || '';
+                    } else if (data.status === 'completed') {
+                        panel.classList.add('d-none');
+                        if (!sessionStorage.getItem('seoReloaded_' + runId)) {
+                            sessionStorage.setItem('seoReloaded_' + runId, '1');
+                            location.reload();
+                        }
+                    } else if (data.status === 'failed') {
+                        panel.classList.remove('d-none');
+                        statusBadge.className = 'badge bg-danger ms-2';
+                        setBar(100, 'bg-danger', false);
+                        percentLabel.textContent = '';
+                        stepLabel.textContent = data.message || 'The generation failed. Check the container logs.';
+                    } else {
+                        panel.classList.add('d-none');
+                        sessionStorage.removeItem('seoReloaded_' + runId);
+                    }
+                } catch (err) { /* transient network hiccup */ }
+            }
+
+            poll();
+            setInterval(poll, 5000);
+        })();
+    </script>
+}
